@@ -276,6 +276,7 @@ function blankProject(){
   return {
     id: uid(),
     createdAt: todayISO(),
+    updatedAt: new Date().toISOString(),
     general:{nombre:'',ruta:'',descripcion:'',ubicacion:'',cliente:'',anio:String(new Date().getFullYear())},
     tramites: [], // [{fechaRadicacion,tipo,numero,nroRadicado,fechaActa}]
     entregas: [], // {type,fecha,obs,obs2,fechaEnvio,entregaCompleta,debidaForma,fechaRadicacion}
@@ -286,18 +287,169 @@ function blankProject(){
   };
 }
 
-/* ==================== PERSISTENCIA ==================== */
+/* ==================== PERSISTENCIA ====================
+   Cada dispositivo guarda una copia local en localStorage (para abrir la
+   app al instante y para que funcione sin conexión), pero la fuente de
+   verdad compartida por todo el equipo es un archivo historial-db.json
+   en la carpeta raíz de Drive (ver descargarDB/subirDB en drive.js).
+   Cada proyecto lleva su propio "updatedAt"; al sincronizar se fusiona
+   por proyecto (gana la versión más reciente), así que dos personas
+   editando proyectos DISTINTOS al mismo tiempo no se pisan entre sí.
+   Si editan el MISMO proyecto a la vez, sigue ganando quien guarde de
+   último (igual que ya pasaba con el Excel).                          */
 async function loadDB(){
   try{
     const res = await window.storage.get('historial-proyectos', false);
     if(res && res.value){ DB = JSON.parse(res.value); }
   }catch(e){ DB = {projects:[]}; }
   if(!DB.projects) DB.projects = [];
+  if(!DB.deletedIds) DB.deletedIds = {};
 }
-async function saveDB(){
+async function persistLocalOnly(){
   try{
     await window.storage.set('historial-proyectos', JSON.stringify(DB), false);
   }catch(e){ console.error('Error guardando', e); toast('⚠ No se pudo guardar en el almacenamiento.'); }
+}
+async function saveDB(){
+  const p = currentProject();
+  if(p) p.updatedAt = new Date().toISOString();
+  await persistLocalOnly();
+  scheduleDriveSync();
+}
+
+/* ---------- sincronización con la base compartida en Drive ---------- */
+let dbFileId = null;
+let syncTimer = null;
+let syncBusy = false;
+let syncPending = false;
+
+// Combina la copia local con la que baja de Drive: por cada proyecto se
+// queda con el que tenga el "updatedAt" más reciente; las eliminaciones
+// (deletedIds) se propagan igual, tomando la fecha de borrado más nueva.
+function mergeDB(local, remote){
+  local = local || {projects:[], deletedIds:{}};
+  remote = remote || {projects:[], deletedIds:{}};
+
+  const deletedIds = Object.assign({}, local.deletedIds);
+  Object.keys(remote.deletedIds||{}).forEach(id=>{
+    if(!deletedIds[id] || remote.deletedIds[id] > deletedIds[id]) deletedIds[id] = remote.deletedIds[id];
+  });
+  // Poda lápidas viejas para que el archivo no crezca indefinidamente.
+  const limite = Date.now() - 180*24*60*60*1000;
+  Object.keys(deletedIds).forEach(id=>{ if(new Date(deletedIds[id]).getTime() < limite) delete deletedIds[id]; });
+
+  const map = new Map();
+  (remote.projects||[]).forEach(p=> map.set(p.id, p));
+  (local.projects||[]).forEach(p=>{
+    const r = map.get(p.id);
+    if(!r || !r.updatedAt || (p.updatedAt && p.updatedAt > r.updatedAt)) map.set(p.id, p);
+  });
+
+  const projects = Array.from(map.values()).filter(p=>{
+    const borrado = deletedIds[p.id];
+    if(!borrado) return true;
+    // Si el proyecto se volvió a editar después de borrarse, se conserva (se "revivió").
+    return p.updatedAt && p.updatedAt > borrado;
+  });
+
+  return { projects, deletedIds };
+}
+
+function scheduleDriveSync(){
+  if(!Drive.conectado()) return; // no forzamos login en cada cambio, solo sincroniza si ya hay sesión abierta
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(pushLocalChange, 1500);
+}
+
+// Sube los cambios locales: descarga lo último de Drive, fusiona y vuelve a subir.
+async function pushLocalChange(){
+  if(!Drive.conectado()) return;
+  if(syncBusy){ syncPending = true; return; }
+  syncBusy = true;
+  setSyncStatus('sync');
+  try{
+    const remoto = await Drive.descargarDB();
+    if(remoto) dbFileId = remoto.id;
+    const fusion = mergeDB(DB, remoto ? remoto.data : null);
+    dbFileId = await Drive.subirDB(fusion, dbFileId);
+    DB = fusion;
+    await persistLocalOnly();
+    renderProjectList();
+    setSyncStatus('ok');
+  }catch(e){
+    console.error('No se pudo sincronizar con Drive', e);
+    setSyncStatus('error', e.message);
+  }finally{
+    syncBusy = false;
+    if(syncPending){ syncPending = false; pushLocalChange(); }
+  }
+}
+
+// Trae los proyectos que hayan agregado o cambiado otras personas del equipo. No sube nada
+// (eso ya lo hace pushLocalChange tras cada edición local), solo fusiona lo que baja de Drive.
+async function pullFromDrive(opts){
+  opts = opts || {};
+  if(!Drive.conectado()){
+    if(!opts.silent) toast('Conéctate a Drive para ver los proyectos del equipo.');
+    return;
+  }
+  if(syncBusy) return;
+  syncBusy = true;
+  setSyncStatus('sync');
+  try{
+    const remoto = await Drive.descargarDB();
+    if(remoto){
+      dbFileId = remoto.id;
+      const antes = DB.projects.length;
+      DB = mergeDB(DB, remoto.data);
+      await persistLocalOnly();
+      renderProjectList();
+      if(!opts.silent){
+        const nuevos = DB.projects.length - antes;
+        toast(nuevos>0 ? ('✓ '+nuevos+' proyecto(s) nuevo(s) del equipo.') : '✓ Lista de proyectos actualizada.');
+      }
+    }else if(!opts.silent){
+      toast('Aún no hay proyectos compartidos en Drive. Se creará el archivo al guardar el primer cambio.');
+    }
+    setSyncStatus('ok');
+  }catch(e){
+    console.error('No se pudo actualizar desde Drive', e);
+    setSyncStatus('error', e.message);
+    if(!opts.silent) toast('⚠ '+e.message);
+  }finally{
+    syncBusy = false;
+  }
+}
+
+// Handler del botón 🔄: conecta si hace falta y trae la lista del equipo.
+async function manualSync(){
+  const btn = document.getElementById('btnSync');
+  if(btn) btn.disabled = true;
+  try{
+    if(!Drive.conectado()) await Drive.conectar();
+    await pullFromDrive();
+  }catch(e){
+    toast('⚠ '+e.message);
+  }finally{
+    if(btn) btn.disabled = false;
+    setSyncStatus();
+  }
+}
+
+function setSyncStatus(state, detail){
+  const el = document.getElementById('syncStatus');
+  if(!el) return;
+  if(state==='sync'){ el.textContent = '⏳ Sincronizando…'; el.className = 'syncstatus'; el.title=''; return; }
+  if(state==='error'){ el.textContent = '⚠ Error al sincronizar'; el.className = 'syncstatus warn'; el.title = detail||''; return; }
+  if(Drive.conectado()){
+    el.textContent = '☁ Conectado';
+    el.className = 'syncstatus ok';
+    el.title = 'Viendo y editando los proyectos de todo el equipo.';
+  }else{
+    el.textContent = '○ Sin conectar';
+    el.className = 'syncstatus';
+    el.title = 'Solo ves tus proyectos locales. Pulsa 🔄 para conectar con Drive y ver los del equipo.';
+  }
 }
 
 function findProjectByRuta(ruta, excludeId){
@@ -363,8 +515,10 @@ function deleteProject(id){
   const p = DB.projects.find(x=>x.id===id);
   if(!p) return;
   const name = p.general.nombre || p.general.descripcion || p.general.ruta || '(Proyecto sin nombre)';
-  const ok = confirm('¿Eliminar el proyecto "'+name+'" de este dashboard?\n\nEsto solo borra el registro local del dashboard: no elimina ni modifica ningún archivo Excel que ya hayas guardado en tu carpeta o Drive.');
+  const ok = confirm('¿Eliminar el proyecto "'+name+'" del dashboard?\n\nSi hay conexión con Drive, se elimina para todo el equipo. Esto solo borra el registro del dashboard: no elimina ni modifica ningún archivo Excel que ya hayas guardado en tu carpeta o Drive.');
   if(!ok) return;
+  if(!DB.deletedIds) DB.deletedIds = {};
+  DB.deletedIds[id] = new Date().toISOString();
   DB.projects = DB.projects.filter(x=>x.id!==id);
   if(currentId===id){
     currentId = DB.projects.length>0 ? DB.projects[0].id : null;
@@ -1121,6 +1275,23 @@ async function sincronizarDrive(){
   await loadDB();
   if(DB.projects.length>0){ currentId = DB.projects[0].id; }
   renderAll();
+  setSyncStatus();
+
+  // Si ya había una sesión de Google abierta (token de la última hora, ver drive.js),
+  // trae en silencio lo que el resto del equipo haya cambiado. Si no, el estado
+  // queda en "Sin conectar" hasta que alguien pulse 🔄 o "Guardar en Drive".
+  try{
+    await Drive.init();
+    if(Drive.conectado()) await pullFromDrive({silent:true});
+  }catch(e){ /* falta configurar CLIENT_ID en config.js, o sin conexión: se sigue en modo local */ }
+  setSyncStatus();
+
+  // Sondeo periódico + al volver a la pestaña, para ver proyectos que agregó o cambió
+  // otra persona mientras este dispositivo estaba abierto. Nunca re-renderiza el
+  // formulario del proyecto abierto (solo la lista lateral), para no interrumpir lo
+  // que se esté escribiendo.
+  setInterval(()=>{ if(Drive.conectado()) pullFromDrive({silent:true}); }, 60000);
+  window.addEventListener('focus', ()=>{ if(Drive.conectado()) pullFromDrive({silent:true}); });
 })();
 
 /* ==================== NAVEGACIÓN MÓVIL ==================== */

@@ -125,14 +125,36 @@ Al pulsar **☁ Guardar en Drive**:
 
 ---
 
+## Lista de proyectos compartida entre dispositivos
+
+Además de los Excel por proyecto, la app guarda un archivo `historial-db.json`
+en la carpeta raíz de Drive con la lista completa de proyectos de todo el
+equipo. Con esto, cualquier persona conectada a Drive ve y puede editar los
+mismos proyectos desde cualquier dispositivo, no solo los que creó ella.
+
+- Al editar un proyecto (con sesión de Drive activa), el cambio se sube solo,
+  unos 1.5 segundos después de dejar de escribir.
+- Al abrir la app, y luego cada minuto (y al volver a la pestaña), se revisa
+  en silencio si el resto del equipo agregó o cambió algo.
+- El botón 🔄, junto a "Sin conectar" / "Conectado" en la barra lateral,
+  fuerza una actualización inmediata (y pide conectar con Drive si hace
+  falta).
+- Si dos personas editan **el mismo proyecto** a la vez, gana quien guarde de
+  último (igual que con el Excel). Si editan proyectos **distintos**, ambos
+  cambios quedan, sin pisarse.
+- Eliminar un proyecto desde el dashboard lo elimina para todo el equipo la
+  próxima vez que cada dispositivo sincronice (no borra ningún Excel).
+- Sin conexión a Drive, la app sigue funcionando con la última copia
+  guardada en este dispositivo (`localStorage`), pero solo se ven los
+  cambios de los demás una vez que se vuelva a conectar.
+
 ## Limitaciones conocidas
 
-- **Sincronización en un solo sentido** (app → Excel). Si dos personas editan el
-  mismo proyecto a la vez, gana quien guarde de último. No hay bloqueo ni aviso.
-- **Los datos viven en cada dispositivo** (`localStorage`). Drive guarda los
-  Excel, no la base de datos de la app: quien abra la app en otro teléfono
-  empieza con la lista de proyectos vacía.
-- **La sesión de Google dura ~1 hora.** Al vencer, la app vuelve a pedir conectar.
+- **Sincronización del Excel en un solo sentido** (app → Excel). Si dos
+  personas editan el mismo proyecto a la vez, gana quien guarde de último
+  en el Excel. No hay bloqueo ni aviso.
+- **La sesión de Google dura ~1 hora.** Al vencer, la app vuelve a pedir
+  conectar (y mientras tanto deja de recibir los cambios del equipo).
 - **iOS instalado en pantalla de inicio:** el login por ventana emergente de
   Google puede comportarse distinto que en Safari normal. Conviene probarlo
   temprano en un iPhone real.

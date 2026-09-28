@@ -31,7 +31,15 @@ const CONFIG = {
   },
 
   XLSX_MIME: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  FOLDER_MIME: 'application/vnd.google-apps.folder'
+  FOLDER_MIME: 'application/vnd.google-apps.folder',
+  JSON_MIME: 'application/json',
+
+  /* Archivo con la lista de proyectos de TODO el equipo, compartido vía
+     Drive (en la carpeta raíz, junto a las carpetas de los años). Es lo
+     que permite que cualquier dispositivo conectado vea y edite los
+     mismos proyectos. Ver DB_SYNC en app.js y descargarDB/subirDB en
+     drive.js.                                                          */
+  DB_FILE_NAME: 'historial-db.json'
 };
 
 CONFIG.isReady = function(){

@@ -223,6 +223,53 @@ const Drive = (function () {
     return r.json();
   }
 
+  /* ---------- base de datos compartida (lista de proyectos de todo el equipo) ---------- */
+
+  // Busca el archivo historial-db.json en la carpeta raíz. Null si nunca se ha creado.
+  async function buscarArchivoDB() {
+    return buscarHijo(CONFIG.DB_FILE_NAME, CONFIG.ROOT_FOLDER_ID, null);
+  }
+
+  // Descarga y parsea la base compartida. Devuelve null si el archivo aún no existe en Drive
+  // (primera vez que alguien del equipo usa esta función, o carpeta recién configurada).
+  async function descargarDB() {
+    const archivo = await buscarArchivoDB();
+    if (!archivo) return null;
+    const buf = await descargar(archivo.id);
+    let datos;
+    try {
+      datos = JSON.parse(new TextDecoder('utf-8').decode(buf));
+    } catch (e) {
+      throw new Error('El archivo ' + CONFIG.DB_FILE_NAME + ' en Drive está dañado o no es JSON válido.');
+    }
+    return { id: archivo.id, data: datos };
+  }
+
+  // Sube la base compartida (crea el archivo la primera vez, lo sobreescribe después).
+  // Devuelve el id del archivo en Drive.
+  async function subirDB(datosDB, fileId) {
+    const cuerpo = new Blob([JSON.stringify(datosDB)], { type: CONFIG.JSON_MIME });
+    if (fileId) {
+      const r = await api(UPLOAD + '/files/' + fileId + '?uploadType=media&fields=id&supportsAllDrives=true', {
+        method: 'PATCH',
+        headers: { 'Content-Type': CONFIG.JSON_MIME },
+        body: cuerpo
+      });
+      const d = await r.json();
+      return d.id;
+    }
+    const meta = { name: CONFIG.DB_FILE_NAME, parents: [CONFIG.ROOT_FOLDER_ID], mimeType: CONFIG.JSON_MIME };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+    form.append('file', cuerpo);
+    const r = await api(UPLOAD + '/files?uploadType=multipart&fields=id&supportsAllDrives=true', {
+      method: 'POST',
+      body: form
+    });
+    const d = await r.json();
+    return d.id;
+  }
+
   /* ---------- sincronización de un proyecto ---------- */
 
   async function sincronizarProyecto(p, avisar) {
@@ -294,6 +341,7 @@ const Drive = (function () {
 
   return {
     init, conectar, desconectar, conectado,
-    carpetaDelAnio, sincronizarProyecto
+    carpetaDelAnio, sincronizarProyecto,
+    descargarDB, subirDB
   };
 })();

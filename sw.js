@@ -11,7 +11,7 @@
    dispositivos recojan la versión nueva.
    ==================================================================== */
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = 'historial-diseno-' + VERSION;
 
 const ARCHIVOS = [
