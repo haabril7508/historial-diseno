@@ -11,7 +11,7 @@
    dispositivos recojan la versión nueva.
    ==================================================================== */
 
-const VERSION = 'v3';
+const VERSION = 'v5';
 const CACHE = 'historial-diseno-' + VERSION;
 
 const ARCHIVOS = [
@@ -30,10 +30,15 @@ const ARCHIVOS = [
   './icons/icon-512.png'
 ];
 
+// Librería que arma los .xlsx (se carga desde un CDN en index.html). Se guarda
+// también, para poder descargar el Excel sin conexión. Es "mejor esfuerzo": si
+// el CDN falla al instalar, la app se instala igual.
+const JSZIP = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+
 self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE)
-      .then((c) => c.addAll(ARCHIVOS))
+      .then((c) => c.addAll(ARCHIVOS).then(() => c.add(JSZIP).catch(() => {})))
       .then(() => self.skipWaiting())
   );
 });
@@ -62,8 +67,8 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Solo cacheamos lo que vive en el mismo origen que la app.
-  if (url.origin !== self.location.origin) return;
+  // Solo cacheamos lo que vive en el mismo origen que la app (y la librería JSZip).
+  if (url.origin !== self.location.origin && req.url !== JSZIP) return;
 
   e.respondWith(
     caches.match(req).then((cacheada) => {

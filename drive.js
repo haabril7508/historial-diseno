@@ -14,13 +14,20 @@
         Si no existe: usar la plantilla maestra (TEMPLATE_B64).
      4. Escribir encima solo las celdas con valor (lo hace buildWorkbook,
         misma lógica de setCell que ya usaba exportExcel: no pisa lo que
-        esté vacío en la app).
+        esté vacío en la app). Excepción: la hoja LISTADO DE PENDIENTES
+        se regenera completa (ver aplicarListado en xlsxpatch.js).
      5. Subirlo: actualizando el archivo existente o creando uno nuevo.
      6. Si cambió el año del proyecto, mover el archivo a la carpeta nueva.
+        (Esto se hace antes del paso 3.)
 
    Nota: la sincronización es en un solo sentido (app -> Excel). Si dos
    personas editan el mismo proyecto a la vez, gana quien sincronice de
-   último.
+   último. La única lectura de Excel es la importación de historiales
+   que ya estaban en Drive (listarExcelsDelHistorial + importarExcelsDeDrive
+   en app.js).
+
+   Sesión: ver el bloque "token" más abajo — el token se guarda entre
+   aperturas y se renueva solo, sin volver a pedir login.
    ==================================================================== */
 
 const Drive = (function () {
@@ -64,16 +71,117 @@ const Drive = (function () {
     restaurarToken();
   }
 
-  /* ---------- token ---------- */
+  /* ---------- token ----------
+     Google entrega a una app sin servidor un token que dura ~1 hora y no
+     da "refresh token". Para no tener que iniciar sesión cada vez que se
+     abre la app:
+       1. El token se guarda en localStorage, así sobrevive a cerrar y
+          reabrir la app mientras no venza.
+       2. Cuando vence, se renueva en silencio (renovarSilencioso): la
+          página va a Google con prompt=none y vuelve de inmediato con un
+          token nuevo, sin mostrar nada, siempre que la cuenta siga con
+          sesión de Google en ese navegador y ya haya autorizado la app.
+          Al ser una redirección y no un popup, el navegador no la
+          bloquea aunque no la dispare un toque del usuario.
+          Requiere registrar la URL de la app como "Authorized redirect
+          URI" en Google Cloud Console (ver SETUP.md).
+       3. Si Google no puede renovar en silencio (se cerró la sesión de
+          Google, se revocó el permiso…), se deja de intentar hasta que
+          alguien pulse 🔄 y vuelva a conectar a mano.                  */
+
+  const K_TOKEN = 'hd:drive-token';
+  const K_CUENTA = 'hd:drive-cuenta';            // correo que conectó (login_hint)
+  const K_STATE = 'hd:oauth-state';              // anti-falsificación del retorno de Google
+  const K_INTENTO = 'hd:oauth-intento';          // cuándo fue el último intento silencioso
+  const K_REQUIERE = 'hd:oauth-requiere-login';  // la renovación silenciosa falló: esperar a 🔄
+
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+  function guardarToken(access, expiresIn) {
+    token = access;
+    tokenExp = Date.now() + (Number(expiresIn || 3600) - 120) * 1000;
+    lsSet(K_TOKEN, JSON.stringify({ token, exp: tokenExp }));
+    lsDel(K_REQUIERE);
+  }
+
+  function olvidarToken() {
+    token = null; tokenExp = 0;
+    lsDel(K_TOKEN);
+  }
 
   function restaurarToken() {
     try {
-      const raw = sessionStorage.getItem('hd:drive-token');
+      const raw = lsGet(K_TOKEN);
       if (!raw) return;
       const t = JSON.parse(raw);
       if (t && t.token && t.exp > Date.now()) { token = t.token; tokenExp = t.exp; }
-    } catch (e) { /* sesión sin storage, se pedirá login */ }
+    } catch (e) { /* token dañado: se pedirá de nuevo */ }
   }
+
+  /* ---------- renovación silenciosa por redirección ---------- */
+
+  let retorno = null; // resultado de la vuelta desde Google: 'ok', un código de error, o null
+
+  // Al cargar la página: si venimos de Google, el token (o el error) llega
+  // en el fragmento de la URL (#access_token=...). Se lee y se borra de la
+  // barra de direcciones.
+  function capturarRetornoOAuth() {
+    const h = location.hash || '';
+    if (!/(^#|&)(access_token|error)=/.test(h)) return;
+    const p = new URLSearchParams(h.slice(1));
+    const esperado = lsGet(K_STATE);
+    lsDel(K_STATE);
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; }
+    if (!esperado || p.get('state') !== esperado) {
+      retorno = 'state_invalido';
+      lsSet(K_REQUIERE, '1');
+      return;
+    }
+    if (p.get('access_token')) {
+      guardarToken(p.get('access_token'), p.get('expires_in'));
+      retorno = 'ok';
+    } else {
+      retorno = p.get('error') || 'error';
+      lsSet(K_REQUIERE, '1');
+    }
+  }
+
+  function urlRetorno() { return new URL('./', location.href).href; }
+
+  // En iPhone, con la app instalada en pantalla de inicio, salir a Google
+  // abre otra ventana y el token no vuelve a la app: ahí no se intenta.
+  function esIOSInstalada() { return window.navigator.standalone === true; }
+
+  function puedeRenovarSilencioso() {
+    if (!CONFIG.isReady() || !CONFIG.RENOVACION_AUTOMATICA) return false;
+    if (!lsGet(K_CUENTA) || lsGet(K_REQUIERE)) return false;
+    if (esIOSInstalada() || navigator.onLine === false) return false;
+    // Evita rebotar contra Google en bucle si algo sale mal.
+    return Date.now() - Number(lsGet(K_INTENTO) || 0) > 2 * 60 * 1000;
+  }
+
+  function renovarSilencioso() {
+    const azar = new Uint32Array(4);
+    crypto.getRandomValues(azar);
+    const state = Array.from(azar, (n) => n.toString(36)).join('');
+    lsSet(K_STATE, state);
+    lsSet(K_INTENTO, String(Date.now()));
+    const params = new URLSearchParams({
+      client_id: CONFIG.CLIENT_ID,
+      redirect_uri: urlRetorno(),
+      response_type: 'token',
+      scope: CONFIG.SCOPE,
+      include_granted_scopes: 'true',
+      prompt: 'none',
+      login_hint: lsGet(K_CUENTA),
+      state: state
+    });
+    location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + params.toString());
+  }
+
+  /* ---------- conexión manual (popup) ---------- */
 
   function pedirToken(prompt) {
     return new Promise((resolve, reject) => {
@@ -81,11 +189,7 @@ const Drive = (function () {
         if (resp.error) {
           return reject(new Error(resp.error_description || resp.error));
         }
-        token = resp.access_token;
-        tokenExp = Date.now() + (Number(resp.expires_in || 3600) - 120) * 1000;
-        try {
-          sessionStorage.setItem('hd:drive-token', JSON.stringify({ token, exp: tokenExp }));
-        } catch (e) { /* sin sessionStorage: el token vive solo en memoria */ }
+        guardarToken(resp.access_token, resp.expires_in);
         resolve(token);
       };
       tokenClient.error_callback = (err) => {
@@ -93,15 +197,31 @@ const Drive = (function () {
           ? 'Cerraste la ventana de Google sin autorizar.'
           : 'No se pudo abrir la ventana de Google.'));
       };
-      tokenClient.requestAccessToken({ prompt: prompt });
+      const opciones = { prompt: prompt };
+      const cuenta = lsGet(K_CUENTA);
+      if (cuenta) opciones.login_hint = cuenta;
+      tokenClient.requestAccessToken(opciones);
     });
   }
 
   function conectado() { return !!token && tokenExp > Date.now(); }
 
+  // Guarda el correo de la cuenta conectada: es lo que permite luego
+  // renovar en silencio sin preguntar "¿con qué cuenta?".
+  async function recordarCuenta() {
+    try {
+      const r = await api(API + '/about?fields=user(emailAddress)');
+      const d = await r.json();
+      if (d.user && d.user.emailAddress) lsSet(K_CUENTA, d.user.emailAddress);
+    } catch (e) { /* sin correo no hay renovación silenciosa, pero la app sigue */ }
+  }
+
   async function conectar() {
     await init();
-    await pedirToken(conectado() ? '' : 'consent');
+    // prompt '' = Google solo pide autorizar si hace falta (la primera vez);
+    // el resto de las veces la ventana se abre y se cierra sola.
+    await pedirToken('');
+    await recordarCuenta();
     return true;
   }
 
@@ -109,14 +229,16 @@ const Drive = (function () {
     if (token && window.google && google.accounts && google.accounts.oauth2) {
       google.accounts.oauth2.revoke(token, () => {});
     }
-    token = null; tokenExp = 0;
-    try { sessionStorage.removeItem('hd:drive-token'); } catch (e) {}
+    olvidarToken();
+    lsDel(K_CUENTA);
   }
 
+  // Las llamadas a la API nunca abren la ventana de Google por su cuenta: muchas
+  // corren en segundo plano (sincronización automática) y el navegador bloquea
+  // ventanas que no vienen de un toque. Conectar es trabajo de conectar().
   async function asegurarToken() {
     if (conectado()) return token;
-    await init();
-    return pedirToken('');
+    throw new Error('La sesión de Google venció. Pulsa 🔄 para volver a conectar.');
   }
 
   /* ---------- llamadas a la API ---------- */
@@ -127,7 +249,7 @@ const Drive = (function () {
     const headers = Object.assign({ Authorization: 'Bearer ' + t }, opts.headers || {});
     const r = await fetch(url, Object.assign({}, opts, { headers }));
     if (r.status === 401) {
-      token = null; tokenExp = 0;
+      olvidarToken();
       throw new Error('La sesión de Google expiró. Vuelve a conectar.');
     }
     if (!r.ok) {
@@ -174,6 +296,49 @@ const Drive = (function () {
     const nombre = String(anio || new Date().getFullYear());
     const existente = await buscarHijo(nombre, CONFIG.ROOT_FOLDER_ID, CONFIG.FOLDER_MIME);
     return existente || await crearCarpeta(nombre, CONFIG.ROOT_FOLDER_ID);
+  }
+
+  // Como q(), pero recorre todas las páginas de resultados.
+  async function listarTodo(consulta, campos) {
+    let archivos = [];
+    let pagina = '';
+    do {
+      const url = API + '/files?q=' + encodeURIComponent(consulta)
+        + '&fields=' + encodeURIComponent('nextPageToken,files(' + campos + ')')
+        + '&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true'
+        + (pagina ? '&pageToken=' + encodeURIComponent(pagina) : '');
+      const d = await (await api(url)).json();
+      archivos = archivos.concat(d.files || []);
+      pagina = d.nextPageToken || '';
+    } while (pagina);
+    return archivos;
+  }
+
+  // Todos los .xlsx dentro de las carpetas de año (Historial de Diseño/2025/…),
+  // con el año de la carpeta donde está cada uno. Lo usa la importación de
+  // historiales creados antes de la base compartida.
+  async function listarExcelsDelHistorial() {
+    const carpetas = (await listarTodo(
+      "'" + esc(CONFIG.ROOT_FOLDER_ID) + "' in parents and mimeType = '" + CONFIG.FOLDER_MIME + "' and trashed = false",
+      'id,name'
+    )).filter((c) => /^\d{4}$/.test(String(c.name).trim()));
+
+    const anioPorCarpeta = {};
+    carpetas.forEach((c) => { anioPorCarpeta[c.id] = String(c.name).trim(); });
+
+    const resultado = [];
+    // De a 20 carpetas por consulta, para no pasarse del largo que acepta la API.
+    for (let i = 0; i < carpetas.length; i += 20) {
+      const grupo = carpetas.slice(i, i + 20);
+      const consulta = '(' + grupo.map((c) => "'" + esc(c.id) + "' in parents").join(' or ') + ')'
+        + " and mimeType = '" + CONFIG.XLSX_MIME + "' and trashed = false";
+      const archivos = await listarTodo(consulta, 'id,name,parents,modifiedTime');
+      archivos.forEach((a) => {
+        const padre = (a.parents || []).find((x) => anioPorCarpeta[x]);
+        resultado.push({ id: a.id, name: a.name, modifiedTime: a.modifiedTime, carpetaId: padre, anio: anioPorCarpeta[padre] });
+      });
+    }
+    return resultado;
   }
 
   /* ---------- archivos ---------- */
@@ -327,21 +492,28 @@ const Drive = (function () {
       ? await actualizarContenido(archivo.id, datos)
       : await subirNuevo(nombreArchivo, carpeta.id, datos);
 
-    p.drive = {
+    // Quien llama (sincronizarDrive en app.js) guarda esto en el proyecto: mientras
+    // se subía, la sincronización con el equipo pudo reemplazar el objeto `p`.
+    return {
       fileId: guardado.id,
       nombre: nombreArchivo,
       anio: anio,
       carpetaId: carpeta.id,
       syncedAt: new Date().toISOString()
     };
-    await saveDB();
-
-    return p.drive;
   }
+
+  // Se ejecuta al cargar el script, antes que app.js: recupera el token
+  // guardado y, si la página viene de vuelta de Google, el token nuevo.
+  restaurarToken();
+  capturarRetornoOAuth();
 
   return {
     init, conectar, desconectar, conectado,
+    puedeRenovarSilencioso, renovarSilencioso,
+    resultadoRetorno: () => retorno,
     carpetaDelAnio, sincronizarProyecto,
-    descargarDB, subirDB
+    descargarDB, subirDB,
+    listarExcelsDelHistorial, descargar
   };
 })();

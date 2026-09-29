@@ -37,9 +37,20 @@ const CONFIG = {
   /* Archivo con la lista de proyectos de TODO el equipo, compartido vía
      Drive (en la carpeta raíz, junto a las carpetas de los años). Es lo
      que permite que cualquier dispositivo conectado vea y edite los
-     mismos proyectos. Ver DB_SYNC en app.js y descargarDB/subirDB en
-     drive.js.                                                          */
-  DB_FILE_NAME: 'historial-db.json'
+     mismos proyectos. Ver sincronizarEquipo en app.js y
+     descargarDB/subirDB en drive.js.                                   */
+  DB_FILE_NAME: 'historial-db.json',
+
+  /* Renovar la sesión de Google en silencio al abrir la app (ver el
+     bloque "token" en drive.js). ANTES de publicar con esto en true hay
+     que registrar la URL de la app en Google Cloud Console →
+     Credentials → el OAuth Client → "Authorized redirect URIs":
+       https://haabril7508.github.io/historial-diseno/
+       http://localhost:8080/
+     Si no están registradas, Google muestra "redirect_uri_mismatch" en
+     vez de volver a la app. Con false, la app funciona como antes: hay
+     que pulsar 🔄 para conectar cuando vence la sesión.                */
+  RENOVACION_AUTOMATICA: true
 };
 
 CONFIG.isReady = function(){

@@ -75,6 +75,25 @@
   .checkrowarq select{width:100%;padding:5px;border:1px solid var(--border);border-radius:5px;font-size:12px;}
   .checkrowarq input{width:100%;padding:5px 7px;border:1px solid var(--border);border-radius:5px;font-size:12px;}
 
+  /* Selectores Sí / No / No aplica (Estructural) */
+  .checkhead.sel,.checkrow.sel{grid-template-columns:1fr 104px 104px;}
+  .checkrowx.sel{grid-template-columns:1fr 104px 104px 28px;}
+  select.sna{width:100%;padding:5px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px;background:#fff;color:var(--text);}
+  select.sna[data-v="Sí"]{background:#e3f3ea;color:var(--ok);border-color:#b9dcc7;font-weight:600;}
+  select.sna[data-v="No aplica"]{background:#eef0f2;color:var(--muted);}
+
+  /* Pestaña Pendientes */
+  .tabcount{display:inline-block;margin-left:6px;min-width:18px;padding:1px 6px;border-radius:9px;background:var(--accent);color:#fff;font-size:10px;line-height:15px;text-align:center;vertical-align:1px;}
+  .pendcount{color:var(--muted);font-weight:600;}
+  .pendgrid{display:flex;flex-direction:column;}
+  .pendhead{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr) 36px;gap:8px;padding:4px 0;font-size:11px;font-weight:700;color:var(--muted);border-bottom:1px solid var(--border);}
+  .pendrow{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr) 36px;gap:8px;padding:6px 0;align-items:center;border-bottom:1px solid #f0f2f4;}
+  .pendrow input{width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:inherit;}
+  .pendrow .pendok{height:34px;border:1px solid #b9dcc7;background:#e3f3ea;color:var(--ok);border-radius:6px;cursor:pointer;font-size:15px;font-weight:700;}
+  .pendnuevo{border-bottom:none;margin-top:6px;}
+  .pendnuevo button.secondary{height:34px;padding:0;font-size:18px;}
+  .pendvacio{padding:8px 0;color:var(--muted);font-size:13px;}
+
   /* ==================================================================
      Capa responsive — iOS y Android (PWA instalada)
      El dashboard original era solo de escritorio: no tenia ninguna
@@ -119,6 +138,17 @@
     .checkrowx{grid-template-columns:1fr 62px 62px 26px;gap:6px;}
     .checkheadarq,.checkrowarq{grid-template-columns:1fr 84px 116px;gap:6px;}
     .checkrow input[type=checkbox],.checkrowx input[type=checkbox]{width:22px;height:22px;}
+    .checkhead.sel,.checkrow.sel{grid-template-columns:1fr 100px 100px;}
+    .checkrowx.sel{grid-template-columns:1fr 100px 100px 26px;}
+    select.sna{font-size:16px;padding:8px 4px;}
+
+    /* Pendientes: en el teléfono cada pendiente ocupa dos renglones */
+    .pendhead{display:none;}
+    .pendrow{grid-template-columns:1fr 44px;}
+    .pendrow input{font-size:16px;padding:10px 12px;}
+    .pendrow input:first-child{grid-column:1;grid-row:1;font-weight:600;}
+    .pendrow input:nth-child(2){grid-column:1;grid-row:2;}
+    .pendrow button{grid-column:2;grid-row:1 / span 2;height:100%;}
 
     table.mini{display:block;overflow-x:auto;white-space:nowrap;}
     button.accent{padding:11px 14px;font-size:13px;}

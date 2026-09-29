@@ -207,12 +207,32 @@ const HS_MEMORIAS_ITEMS = [
  ['s','(s) Actualización de tablas y portada de las memorias',38]
 ];
 
+// Hoja "LISTADO DE PENDIENTES": un bloque por disciplina. En la plantilla cada
+// bloque tiene su título en la columna B (fila "fila") y 5 filas para datos
+// (fila+1 a fila+5) con Pendiente en D y Descripción / observación en E. Si
+// una lista tiene más de 5, al armar el Excel se insertan filas (ver
+// aplicarListado en xlsxpatch.js).
+const PEND_HOJA = 'LISTADO DE PENDIENTES';
+const PEND_FILAS = 5;
+const PEND_LISTAS = [
+ {key:'estructural',    label:'Pendientes estructural', fila:3},
+ {key:'geotecnia',      label:'Pendientes geotecnia', fila:10},
+ {key:'memorias',       label:'Pendientes informes y memorias de cálculo', fila:17},
+ {key:'arquitectura',   label:'Pendientes arquitectura', fila:24},
+ {key:'hidrosanitario', label:'Pendientes hidrosanitario', fila:31}
+];
+
+// Valores de las casillas de Estructural (Información actualizada y Memorias).
+// "No aplica" se escribe tal cual en el Excel, que lo resalta con su formato condicional.
+const OPC_SNA = ['Sí','No','No aplica'];
+
 const TABS = [
  {id:'general', label:'General'},
  {id:'estructural', label:'Estructural'},
  {id:'geotecnico', label:'Geotécnico'},
  {id:'arquitectura', label:'Arquitectura'},
- {id:'hidrosanitario', label:'Hidrosanitario'}
+ {id:'hidrosanitario', label:'Hidrosanitario'},
+ {id:'pendientes', label:'Pendientes'}
 ];
 
 /* ==================== ESTADO ==================== */
@@ -283,8 +303,20 @@ function blankProject(){
     estructural:{lastItemRow:null, fechaActualizacion:'', descripcion:'', elementos:{}, elementosDer:{}, memorias:{}, elementosExtra:[]},
     geotecnico:{items:{}, fechaActualizacion:'', descripcion:''},
     arquitectura:{items:{}},
-    hidrosanitario:{elementos:{}, memorias:{}}
+    hidrosanitario:{elementos:{}, memorias:{}},
+    pendientes: pendientesVacios() // {estructural:[{pendiente,descripcion}], geotecnia:[...], ...}
   };
+}
+function pendientesVacios(){
+  const o = {};
+  PEND_LISTAS.forEach(l=>{ o[l.key] = []; });
+  return o;
+}
+// Los proyectos creados antes de la pestaña Pendientes no traen el bloque.
+function asegurarPendientes(p){
+  if(!p.pendientes) p.pendientes = pendientesVacios();
+  PEND_LISTAS.forEach(l=>{ if(!Array.isArray(p.pendientes[l.key])) p.pendientes[l.key] = []; });
+  return p.pendientes;
 }
 
 /* ==================== PERSISTENCIA ====================
@@ -310,9 +342,17 @@ async function persistLocalOnly(){
     await window.storage.set('historial-proyectos', JSON.stringify(DB), false);
   }catch(e){ console.error('Error guardando', e); toast('⚠ No se pudo guardar en el almacenamiento.'); }
 }
+// Llamar SOLO cuando el proyecto abierto realmente cambió: marca su "updatedAt",
+// y esa fecha decide qué versión gana al fusionar con el equipo. Marcarlo sin
+// cambios reales haría que una copia vieja de este dispositivo pisara lo que
+// otra persona guardó después.
 async function saveDB(){
   const p = currentProject();
   if(p) p.updatedAt = new Date().toISOString();
+  await guardarSinMarcar();
+}
+// Guarda y sincroniza sin tocar la fecha de ningún proyecto (ej. al eliminar uno).
+async function guardarSinMarcar(){
   await persistLocalOnly();
   scheduleDriveSync();
 }
@@ -334,9 +374,11 @@ function mergeDB(local, remote){
   Object.keys(remote.deletedIds||{}).forEach(id=>{
     if(!deletedIds[id] || remote.deletedIds[id] > deletedIds[id]) deletedIds[id] = remote.deletedIds[id];
   });
-  // Poda lápidas viejas para que el archivo no crezca indefinidamente.
+  // Poda lápidas viejas para que el archivo no crezca indefinidamente. Las de
+  // Excel importados ("x-…") se conservan: si se podaran, el Excel que sigue en
+  // Drive se volvería a importar como proyecto nuevo.
   const limite = Date.now() - 180*24*60*60*1000;
-  Object.keys(deletedIds).forEach(id=>{ if(new Date(deletedIds[id]).getTime() < limite) delete deletedIds[id]; });
+  Object.keys(deletedIds).forEach(id=>{ if(!id.startsWith('x-') && new Date(deletedIds[id]).getTime() < limite) delete deletedIds[id]; });
 
   const map = new Map();
   (remote.projects||[]).forEach(p=> map.set(p.id, p));
@@ -352,7 +394,48 @@ function mergeDB(local, remote){
     return p.updatedAt && p.updatedAt > borrado;
   });
 
-  return { projects, deletedIds };
+  return { projects: deduplicarPorArchivo(projects, deletedIds), deletedIds };
+}
+
+// Un mismo Excel de Drive no puede quedar como dos proyectos. Pasa si un
+// historial se importó desde Drive (id "x-…") y después llega el proyecto
+// original desde el dispositivo donde se creó: se conserva la versión editada
+// más recientemente (a igualdad, la original) y la otra queda como eliminada.
+function deduplicarPorArchivo(projects, deletedIds){
+  function preferido(a, b){
+    if((a.updatedAt||'') !== (b.updatedAt||'')) return (a.updatedAt||'') > (b.updatedAt||'') ? a : b;
+    const ax = a.id.startsWith('x-'), bx = b.id.startsWith('x-');
+    if(ax !== bx) return ax ? b : a;
+    return a.id < b.id ? a : b;
+  }
+  const porArchivo = new Map();
+  const quedan = [];
+  projects.forEach(p=>{
+    const fid = p.drive && p.drive.fileId;
+    const otro = fid && porArchivo.get(fid);
+    if(!otro){
+      if(fid) porArchivo.set(fid, p);
+      quedan.push(p);
+      return;
+    }
+    const gana = preferido(p, otro);
+    const pierde = gana===p ? otro : p;
+    deletedIds[pierde.id] = new Date().toISOString();
+    porArchivo.set(fid, gana);
+    quedan[quedan.indexOf(otro)] = gana;
+  });
+  return quedan;
+}
+
+// ¿La versión fusionada trae algo que el archivo de Drive todavía no tiene?
+// (proyectos solo locales, ediciones más nuevas, eliminaciones, importaciones)
+function difiereDeRemoto(fusion, remoto){
+  if(!remoto) return fusion.projects.length>0 || Object.keys(fusion.deletedIds).length>0;
+  const fechas = new Map((remoto.projects||[]).map(p=>[p.id, p.updatedAt||'']));
+  if(fechas.size !== fusion.projects.length) return true;
+  if(fusion.projects.some(p=> fechas.get(p.id) !== (p.updatedAt||''))) return true;
+  const rd = remoto.deletedIds || {};
+  return Object.keys(fusion.deletedIds).some(id=> rd[id] !== fusion.deletedIds[id]);
 }
 
 function scheduleDriveSync(){
@@ -361,78 +444,104 @@ function scheduleDriveSync(){
   syncTimer = setTimeout(pushLocalChange, 1500);
 }
 
-// Sube los cambios locales: descarga lo último de Drive, fusiona y vuelve a subir.
-async function pushLocalChange(){
-  if(!Drive.conectado()) return;
-  if(syncBusy){ syncPending = true; return; }
-  syncBusy = true;
-  setSyncStatus('sync');
-  try{
-    const remoto = await Drive.descargarDB();
-    if(remoto) dbFileId = remoto.id;
-    const fusion = mergeDB(DB, remoto ? remoto.data : null);
-    dbFileId = await Drive.subirDB(fusion, dbFileId);
-    DB = fusion;
-    await persistLocalOnly();
-    renderProjectList();
-    setSyncStatus('ok');
-  }catch(e){
-    console.error('No se pudo sincronizar con Drive', e);
-    setSyncStatus('error', e.message);
-  }finally{
-    syncBusy = false;
-    if(syncPending){ syncPending = false; pushLocalChange(); }
-  }
-}
+// Tras cada edición local (vía scheduleDriveSync).
+function pushLocalChange(){ return sincronizarEquipo({silent:true}); }
 
-// Trae los proyectos que hayan agregado o cambiado otras personas del equipo. No sube nada
-// (eso ya lo hace pushLocalChange tras cada edición local), solo fusiona lo que baja de Drive.
-async function pullFromDrive(opts){
+let importPending = false;
+
+// Sincronización completa con el equipo:
+//   1. baja historial-db.json y lo fusiona con la copia local;
+//   2. (opts.importar) agrega los Excel de Drive que aún no estén en la lista;
+//   3. sube el resultado solo si trae algo que Drive no tenga (proyectos que
+//      solo existían en este dispositivo, ediciones, eliminaciones, importados).
+// opts.silent: sin mensajes salvo errores importantes o importaciones.
+async function sincronizarEquipo(opts){
   opts = opts || {};
   if(!Drive.conectado()){
     if(!opts.silent) toast('Conéctate a Drive para ver los proyectos del equipo.');
     return;
   }
-  if(syncBusy) return;
+  if(syncBusy){
+    syncPending = true;
+    if(opts.importar) importPending = true;
+    return;
+  }
   syncBusy = true;
   setSyncStatus('sync');
+  const idAntes = currentId;
+  const objAntes = currentProject();
+  const cuantosAntes = DB.projects.length;
   try{
     const remoto = await Drive.descargarDB();
-    if(remoto){
-      dbFileId = remoto.id;
-      const antes = DB.projects.length;
-      DB = mergeDB(DB, remoto.data);
-      await persistLocalOnly();
-      renderProjectList();
-      if(!opts.silent){
-        const nuevos = DB.projects.length - antes;
-        toast(nuevos>0 ? ('✓ '+nuevos+' proyecto(s) nuevo(s) del equipo.') : '✓ Lista de proyectos actualizada.');
-      }
-    }else if(!opts.silent){
-      toast('Aún no hay proyectos compartidos en Drive. Se creará el archivo al guardar el primer cambio.');
+    if(remoto) dbFileId = remoto.id;
+    let fusion = mergeDB(DB, remoto ? remoto.data : null);
+
+    let importados = 0;
+    if(opts.importar){
+      importados = await importarExcelsDeDrive(fusion);
+      if(importados) fusion = mergeDB(fusion, null);
     }
+
+    if(difiereDeRemoto(fusion, remoto ? remoto.data : null)){
+      dbFileId = await Drive.subirDB(fusion, dbFileId);
+    }
+
+    // Se fusiona de nuevo con DB (no se reemplaza) por si el usuario editó algo
+    // mientras se esperaba a Drive: esa edición es más reciente y se conserva.
+    DB = mergeDB(DB, fusion);
+    if(!DB.projects.some(p=>p.id===currentId)){
+      currentId = DB.projects.length ? DB.projects[0].id : null;
+    }
+    await persistLocalOnly();
+
+    // El formulario abierto solo se redibuja si su proyecto se eliminó, o si lo
+    // cambió OTRO dispositivo (llegó otra versión, con otra fecha) y no hay nada a
+    // medio escribir. Las ediciones propias hechas mientras tanto no cuentan: ya
+    // están en pantalla.
+    const actual = currentProject();
+    const cambioRemoto = !!actual && !!objAntes && actual!==objAntes && actual.updatedAt!==objAntes.updatedAt;
+    if(currentId!==idAntes || (cambioRemoto && !editandoCampo() && !hayBorradorSinAgregar())) renderAll();
+    else { renderProjectList(); renderTabs(); }
+
     setSyncStatus('ok');
+    if(importados){
+      toast('✓ Se importaron '+importados+' historial(es) que ya estaban en Drive.');
+    }else if(!opts.silent){
+      const nuevos = DB.projects.length - cuantosAntes;
+      toast(nuevos>0 ? ('✓ '+nuevos+' proyecto(s) nuevo(s) del equipo.') : '✓ Lista de proyectos actualizada.');
+    }
   }catch(e){
-    console.error('No se pudo actualizar desde Drive', e);
+    console.error('No se pudo sincronizar con Drive', e);
     setSyncStatus('error', e.message);
     if(!opts.silent) toast('⚠ '+e.message);
   }finally{
     syncBusy = false;
+    if(syncPending){
+      const importar = importPending;
+      syncPending = false; importPending = false;
+      sincronizarEquipo({silent:true, importar});
+    }
   }
 }
 
-// Handler del botón 🔄: conecta si hace falta y trae la lista del equipo.
+function editandoCampo(){
+  const a = document.activeElement;
+  return !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.id!=='searchBox';
+}
+
+// Handler del botón 🔄: conecta si hace falta, trae la lista del equipo y
+// revisa si hay Excel en Drive que todavía no estén en la app.
 async function manualSync(){
   const btn = document.getElementById('btnSync');
   if(btn) btn.disabled = true;
   try{
     if(!Drive.conectado()) await Drive.conectar();
-    await pullFromDrive();
+    await sincronizarEquipo({importar:true});
   }catch(e){
     toast('⚠ '+e.message);
+    setSyncStatus();
   }finally{
     if(btn) btn.disabled = false;
-    setSyncStatus();
   }
 }
 
@@ -440,6 +549,8 @@ function setSyncStatus(state, detail){
   const el = document.getElementById('syncStatus');
   if(!el) return;
   if(state==='sync'){ el.textContent = '⏳ Sincronizando…'; el.className = 'syncstatus'; el.title=''; return; }
+  if(state==='conectando'){ el.textContent = '⏳ Conectando con Drive…'; el.className = 'syncstatus'; el.title=''; return; }
+  if(state==='importando'){ el.textContent = '⏳ Importando historiales '+(detail||'')+'…'; el.className = 'syncstatus'; el.title=''; return; }
   if(state==='error'){ el.textContent = '⚠ Error al sincronizar'; el.className = 'syncstatus warn'; el.title = detail||''; return; }
   if(Drive.conectado()){
     el.textContent = '☁ Conectado';
@@ -456,6 +567,227 @@ function findProjectByRuta(ruta, excludeId){
   const key = slugify(ruta);
   if(!key) return null;
   return DB.projects.find(p => p.id!==excludeId && slugify(p.general.ruta)===key);
+}
+
+/* ==================== IMPORTAR HISTORIALES QUE YA ESTABAN EN DRIVE ====================
+   Antes de la base compartida, cada proyecto vivía solo en el dispositivo
+   donde se creó, pero su Excel sí se subía a Drive. Aquí se recorren los
+   Excel de las carpetas de año y se crea un proyecto por cada uno que la app
+   todavía no conozca, leyendo las celdas al revés de como las escribe
+   buildWorkbook(). El id del proyecto importado es "x-" + id del archivo, así
+   dos dispositivos que importen a la vez producen el mismo proyecto (no se
+   duplica), y si alguien lo elimina, la lápida impide que se reimporte.     */
+async function importarExcelsDeDrive(base){
+  const archivos = await Drive.listarExcelsDelHistorial();
+  const conocidos = new Set();
+  const nombres = new Set();
+  base.projects.forEach(p=>{
+    if(p.drive && p.drive.fileId) conocidos.add(p.drive.fileId);
+    nombres.add(String(p.general.anio||'')+'/'+CONFIG.fileName(p).normalize('NFC'));
+  });
+  const pendientes = archivos.filter(a=>
+    !conocidos.has(a.id) &&
+    !base.deletedIds['x-'+a.id] &&
+    // Un proyecto con el mismo nombre y año que aún no subió su Excel: es el mismo,
+    // se enlazará con el archivo la próxima vez que se pulse "Guardar en Drive".
+    !nombres.has(String(a.anio||'')+'/'+String(a.name).normalize('NFC'))
+  );
+  let n = 0;
+  for(const a of pendientes){
+    setSyncStatus('importando', (n+1)+'/'+pendientes.length);
+    try{
+      const datos = await Drive.descargar(a.id);
+      base.projects.push(await proyectoDesdeExcel(datos, a));
+      n++;
+    }catch(e){
+      console.warn('No se pudo importar "'+a.name+'"', e);
+    }
+  }
+  return n;
+}
+
+// --- lectura de celdas ---
+function celTexto(hoja, addr){
+  const v = hoja[addr];
+  if(v===undefined || v===null) return '';
+  if(typeof v==='boolean') return v ? 'Sí' : 'No';
+  return String(v).trim();
+}
+function celMarcada(hoja, addr){
+  const v = hoja[addr];
+  if(typeof v==='boolean') return v;
+  return ['si','true','verdadero','x','1'].includes(slugify(v));
+}
+function celSiNo(hoja, addr){
+  const s = slugify(celTexto(hoja, addr));
+  if(s==='si' || s==='true' || s==='verdadero') return 'Sí';
+  if(s==='no' || s==='false' || s==='falso') return 'No';
+  if(s==='no-aplica') return 'No aplica';
+  return celTexto(hoja, addr);
+}
+// Fechas: la app las escribe como texto AAAA-MM-DD, pero si alguien editó el
+// Excel a mano pueden venir como número de serie de Excel o como DD/MM/AAAA.
+function celFecha(hoja, addr){
+  const v = hoja[addr];
+  if(typeof v==='number' && v>20000 && v<80000){
+    return new Date(Date.UTC(1899,11,30) + Math.round(v)*86400000).toISOString().slice(0,10);
+  }
+  const s = celTexto(hoja, addr);
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+  if(m) return m[3]+'-'+m[2].padStart(2,'0')+'-'+m[1].padStart(2,'0');
+  return s;
+}
+
+function nombreDesdeArchivo(nombreArchivo){
+  return String(nombreArchivo).normalize('NFC')
+    .replace(/\.xlsx$/i,'')
+    .replace(/^Historial_de_dise(ñ|n)o\s*-\s*/i,'')
+    .trim();
+}
+
+async function proyectoDesdeExcel(datos, archivo){
+  const E_NOMBRE = 'DISEÑO ESTRUCTURAL', GEO_NOMBRE = 'ESTUDIOS DE SUELOS';
+  const H = await XlsxPatch.leerCeldas(datos, ['GENERAL', E_NOMBRE, GEO_NOMBRE, 'ARQUITECTURA', 'HIDROSANITARIO', PEND_HOJA]);
+  const G = H['GENERAL'], E = H[E_NOMBRE], GEO = H[GEO_NOMBRE], ARQ = H['ARQUITECTURA'], HS = H['HIDROSANITARIO'];
+  // Sí / No / No aplica tal como vengan; cualquier otra cosa cuenta como No.
+  const sna = (v)=> OPC_SNA.includes(v) ? v : 'No';
+
+  const p = blankProject();
+  p.id = 'x-' + archivo.id;
+  p.updatedAt = archivo.modifiedTime || new Date().toISOString();
+  p.drive = { fileId: archivo.id, nombre: archivo.name, anio: archivo.anio, carpetaId: archivo.carpetaId, syncedAt: archivo.modifiedTime || '' };
+
+  /* ---- GENERAL ---- */
+  const descripcion = celTexto(G,'D4');
+  p.general = {
+    nombre: nombreDesdeArchivo(archivo.name),
+    ruta: celTexto(G,'D2'),
+    descripcion: /^ejemplo/i.test(descripcion) ? '' : descripcion, // la plantilla trae "EJEMPLO: …"
+    ubicacion: celTexto(G,'D6'),
+    cliente: celTexto(G,'D7'),
+    anio: archivo.anio || String(new Date().getFullYear())
+  };
+
+  // Trámites: desde la fila 115 hasta la primera vacía (la 130 ya es de elementos adicionales)
+  for(let row=115; row<130; row++){
+    const t = {
+      fechaRadicacion: celFecha(G,'B'+row), tipo: celTexto(G,'D'+row), numero: celTexto(G,'E'+row),
+      nroRadicado: celTexto(G,'F'+row), fechaActa: celFecha(G,'G'+row)
+    };
+    if(!t.fechaRadicacion && !t.tipo && !t.nroRadicado && !t.fechaActa) break;
+    const tipo = slugify(t.tipo);
+    t.tipo = tipo.startsWith('plan') ? 'Planeación' : 'Curaduría';
+    if(t.tipo!=='Curaduría') t.numero = '';
+    p.tramites.push(t);
+  }
+
+  // Entregas: cada bloque tiene 5 consecutivos. Los huecos (p. ej. EE-1 vacío y
+  // EE-2 lleno) se conservan como entregas vacías para que cada una vuelva a su fila.
+  Object.keys(DELIVERY_TYPES).forEach(type=>{
+    const cfg = DELIVERY_TYPES[type];
+    const bloque = [];
+    for(let i=0; i<DELIVERY_SLOTS; i++){
+      const row = cfg.startRow + i;
+      const e = {
+        type, fecha: celFecha(G, cfg.cols.fecha+row), obs: celTexto(G, cfg.cols.obs+row),
+        obs2: celTexto(G, cfg.cols.obs2+row), fechaEnvio: celFecha(G, cfg.cols.fechaEnvio+row)
+      };
+      let tieneDatos = !!(e.fecha || e.obs || e.obs2 || e.fechaEnvio);
+      if(cfg.extraEE){
+        e.entregaCompleta = celSiNo(G, cfg.cols.entregaCompleta+row)==='Sí' ? 'Sí' : 'No';
+        e.debidaForma = celSiNo(G, cfg.cols.debidaForma+row)==='Sí' ? 'Sí' : 'No';
+        e.fechaRadicacion = celFecha(G, cfg.cols.fechaRadicacion+row);
+        tieneDatos = tieneDatos || !!e.fechaRadicacion;
+      }
+      bloque.push(tieneDatos ? e : null);
+    }
+    while(bloque.length && !bloque[bloque.length-1]) bloque.pop();
+    bloque.forEach(e=> p.entregas.push(e || {type, fecha:'', obs:'', obs2:'', fechaEnvio:''}));
+  });
+
+  // Información actualizada a última versión (filas 90-100) y memorias (104-111)
+  ELEM_LEFT.forEach(([key,label,row])=>{
+    const r = celSiNo(G,'D'+row), d = celSiNo(G,'E'+row);
+    if(r || d) p.estructural.elementos[key] = {realizado: sna(r), diagramado: sna(d)};
+  });
+  ELEM_RIGHT.forEach(([key,label,row])=>{
+    const r = celSiNo(G,'G'+row), d = celSiNo(G,'H'+row);
+    if(r || d) p.estructural.elementosDer[key] = {realizado: sna(r), diagramado: sna(d)};
+  });
+  MEMORIAS_ITEMS.forEach(([key,label,row])=>{
+    const r = celSiNo(G,'D'+row), s = celSiNo(G,'G'+row);
+    if(r || s) p.estructural.memorias[key] = {radicacion: sna(r), subsanacion: sna(s)};
+  });
+  // Elementos adicionales (bloque que agrega la app desde la fila 130)
+  if(/elementos adicionales/i.test(celTexto(G,'B130'))){
+    for(let row=132; celTexto(G,'B'+row); row++){
+      p.estructural.elementosExtra.push({
+        label: celTexto(G,'B'+row),
+        realizado: sna(celSiNo(G,'D'+row)),
+        diagramado: sna(celSiNo(G,'E'+row))
+      });
+    }
+  }
+
+  /* ---- LISTADO DE PENDIENTES (los Excel viejos no tienen la hoja) ----
+     Los bloques pueden tener más de 5 filas si la app las agregó: se ubican
+     por su título en la columna B y se leen hasta el título siguiente. */
+  const PH = H[PEND_HOJA] || {};
+  const titulos = [];
+  Object.keys(PH).forEach(addr=>{
+    const m = addr.match(/^B(\d+)$/);
+    if(!m) return;
+    const t = slugify(celTexto(PH, addr));
+    const l = PEND_LISTAS.find(x=> t===slugify(x.label) || (t.startsWith('pendientes-') && slugify(x.label).startsWith(t)));
+    if(l) titulos.push({key:l.key, fila:Number(m[1])});
+  });
+  titulos.sort((a,b)=>a.fila-b.fila);
+  titulos.forEach((t,i)=>{
+    const hasta = i+1<titulos.length ? titulos[i+1].fila : t.fila + 200;
+    for(let row=t.fila+1; row<hasta; row++){
+      const pendiente = celTexto(PH,'D'+row), descripcion = celTexto(PH,'E'+row);
+      if(pendiente || descripcion) p.pendientes[t.key].push({pendiente, descripcion});
+    }
+  });
+
+  /* ---- DISEÑO ESTRUCTURAL: el último ítem marcado es el punto en que quedó ---- */
+  let ultimo = null;
+  STRUCT_FLAT.forEach(it=>{ if(celMarcada(E,'C'+it.row)) ultimo = it.row; });
+  if(ultimo){
+    p.estructural.lastItemRow = ultimo;
+    p.estructural.fechaActualizacion = celFecha(E,'P2');
+  }
+  p.estructural.descripcion = celTexto(E,'B146');
+
+  /* ---- ESTUDIOS DE SUELOS ---- */
+  GEO_FLAT.forEach(it=>{
+    const realizado = celMarcada(GEO,'C'+it.row) ? 'Sí' : 'No';
+    const estado = celSiNo(GEO,'E'+it.row);
+    const estadoPorDefecto = GEO_DEFAULT_NA.includes(it.row) ? 'No aplica' : '';
+    if(realizado==='Sí' || estado!==estadoPorDefecto) p.geotecnico.items[it.row] = {realizado, estado};
+  });
+  p.geotecnico.fechaActualizacion = celFecha(GEO,'M2');
+  p.geotecnico.descripcion = celTexto(GEO,'B73');
+
+  /* ---- ARQUITECTURA (la plantilla trae "Si" y "Comentarios" de relleno) ---- */
+  ARQ_ITEMS.forEach(([key,label,row])=>{
+    const estado = celSiNo(ARQ,'D'+row) || 'Sí';
+    let comentario = celTexto(ARQ,'E'+row);
+    if(/^comentarios$/i.test(comentario)) comentario = '';
+    if(estado!=='Sí' || comentario) p.arquitectura.items[row] = {estado, comentario};
+  });
+
+  /* ---- HIDROSANITARIO ---- */
+  HS_ELEM_ITEMS.forEach(([key,label,row])=>{
+    const r = celSiNo(HS,'C'+row), d = celSiNo(HS,'D'+row);
+    if(r || d) p.hidrosanitario.elementos[key] = {realizado: r==='Sí'?'Sí':'No', diagramado: d==='Sí'?'Sí':'No'};
+  });
+  HS_MEMORIAS_ITEMS.forEach(([key,label,row])=>{
+    const r = celSiNo(HS,'C'+row), s = celSiNo(HS,'D'+row);
+    if(r || s) p.hidrosanitario.memorias[key] = {radicacion: r==='Sí'?'Sí':'No', subsanacion: s==='Sí'?'Sí':'No'};
+  });
+
+  return p;
 }
 
 /* ==================== UI: PROYECTOS ==================== */
@@ -519,12 +851,14 @@ function deleteProject(id){
   if(!ok) return;
   if(!DB.deletedIds) DB.deletedIds = {};
   DB.deletedIds[id] = new Date().toISOString();
+  // Su Excel sigue en Drive: esta lápida evita que la importación lo traiga de vuelta.
+  if(p.drive && p.drive.fileId) DB.deletedIds['x-'+p.drive.fileId] = DB.deletedIds[id];
   DB.projects = DB.projects.filter(x=>x.id!==id);
   if(currentId===id){
     currentId = DB.projects.length>0 ? DB.projects[0].id : null;
     currentTab = 'general';
   }
-  saveDB();
+  guardarSinMarcar(); // no saveDB(): marcaría como editado el proyecto que quedó abierto
   renderAll();
   toast('🗑 Proyecto "'+name+'" eliminado del dashboard.');
 }
@@ -548,6 +882,7 @@ function renderTopbar(){
 }
 
 function renderTabs(){
+  recordarVista();
   const bar = document.getElementById('tabsBar');
   bar.innerHTML = '';
   const p = currentProject();
@@ -555,6 +890,12 @@ function renderTabs(){
     const el = document.createElement('div');
     el.className = 'tab' + (currentTab===t.id?' active':'');
     el.textContent = t.label;
+    if(t.id==='pendientes' && totalPendientes(p)){
+      const n = document.createElement('span');
+      n.className = 'tabcount';
+      n.textContent = totalPendientes(p);
+      el.appendChild(n);
+    }
     if(p) el.onclick = ()=>{ currentTab=t.id; renderContent(); renderTabs(); };
     else el.style.opacity = .4;
     bar.appendChild(el);
@@ -573,6 +914,7 @@ function renderContent(){
   if(currentTab==='geotecnico') return renderGeotecnico(p,c);
   if(currentTab==='arquitectura') return renderArquitectura(p,c);
   if(currentTab==='hidrosanitario') return renderHidrosanitario(p,c);
+  if(currentTab==='pendientes') return renderPendientes(p,c);
 }
 
 /* ---------- TAB GENERAL ---------- */
@@ -681,20 +1023,51 @@ function renderEntregaExtra(){
   document.getElementById('e_extra_ee').style.display = cfg.extraEE ? 'grid' : 'none';
 }
 
+// ¿El proyecto tiene algo más que los datos generales? (para no descartar trabajo sin avisar)
+function tieneDatos(p){
+  const e = p.estructural || {}, g = p.geotecnico || {}, a = p.arquitectura || {}, h = p.hidrosanitario || {};
+  return (p.tramites||[]).length>0 || (p.entregas||[]).length>0 || totalPendientes(p)>0 ||
+    !!e.lastItemRow || !!e.descripcion || (e.elementosExtra||[]).length>0 ||
+    [e.elementos, e.elementosDer, e.memorias, g.items, a.items, h.elementos, h.memorias].some(o=> o && Object.keys(o).length>0) ||
+    !!g.descripcion;
+}
+
 function autoSaveGeneral(){
   const p = currentProject();
   if(!p) return;
-  const newRuta = document.getElementById('g_ruta').value.trim();
-  const dup = findProjectByRuta(newRuta, p.id);
+  const nuevo = {
+    nombre: document.getElementById('g_nombre').value,
+    ruta: document.getElementById('g_ruta').value.trim(),
+    cliente: document.getElementById('g_cliente').value,
+    ubicacion: document.getElementById('g_ubicacion').value,
+    descripcion: document.getElementById('g_descripcion').value,
+    anio: document.getElementById('g_anio').value
+  };
+  // Salir de un campo sin cambiar nada no cuenta como edición.
+  if(Object.keys(nuevo).every(k=> String(p.general[k]||'')===String(nuevo[k]||''))) return;
+
+  const rutaCambio = slugify(nuevo.ruta)!==slugify(p.general.ruta);
+  const dup = rutaCambio ? findProjectByRuta(nuevo.ruta, p.id) : null;
   if(dup){
-    toast('⚠ Ya existe un proyecto con esa ruta: "'+ (dup.general.nombre||dup.general.descripcion||dup.general.ruta) +'". Se actualizará ese proyecto en su lugar.');
-    dup.general = {nombre:document.getElementById('g_nombre').value, ruta:newRuta, cliente:document.getElementById('g_cliente').value, ubicacion:document.getElementById('g_ubicacion').value, descripcion:document.getElementById('g_descripcion').value, anio:document.getElementById('g_anio').value};
-    DB.projects = DB.projects.filter(x=>x.id!==p.id);
-    currentId = dup.id;
-    saveDB(); renderAll();
-    return;
+    const nombreDup = dup.general.nombre||dup.general.descripcion||dup.general.ruta;
+    const aviso = tieneDatos(p)
+      ? '\n\n⚠ OJO: este proyecto ya tiene información (trámites, entregas, checklists o pendientes) que se PERDERÁ.'
+      : '';
+    const abrir = confirm('Ya existe un proyecto con esa ruta: "'+nombreDup+'".\n\n'+
+      'Aceptar: abrir ese proyecto y descartar este.'+aviso+'\n\n'+
+      'Cancelar: conservar los dos proyectos con la misma ruta.');
+    if(abrir){
+      // Solo se completan los datos que al existente le falten; nunca se borran los suyos.
+      Object.keys(nuevo).forEach(k=>{ if(!String(dup.general[k]||'').trim() && String(nuevo[k]||'').trim()) dup.general[k] = nuevo[k]; });
+      if(!DB.deletedIds) DB.deletedIds = {};
+      DB.deletedIds[p.id] = new Date().toISOString(); // si no, la sincronización lo traería de vuelta
+      DB.projects = DB.projects.filter(x=>x.id!==p.id);
+      currentId = dup.id;
+      saveDB(); renderAll();
+      return;
+    }
   }
-  p.general = {nombre:document.getElementById('g_nombre').value, ruta:newRuta, cliente:document.getElementById('g_cliente').value, ubicacion:document.getElementById('g_ubicacion').value, descripcion:document.getElementById('g_descripcion').value, anio:document.getElementById('g_anio').value};
+  p.general = nuevo;
   saveDB();
   renderProjectList();
   renderTopbar();
@@ -766,13 +1139,19 @@ function elemVal(p, side, key, field){
 function memVal(p, key, field){
   return (p.estructural.memorias && p.estructural.memorias[key] && p.estructural.memorias[key][field]) || 'No';
 }
-function toggleElem(side, key, field, checked){
+// Selector Sí / No / No aplica. `accion` es el llamado JS que recibe el valor
+// elegido como último argumento (ej. "setElem('left','losas','realizado',").
+function selSNA(valor, accion){
+  return `<select class="sna" data-v="${valor}" onchange="this.dataset.v=this.value;${accion}this.value)">` +
+    OPC_SNA.map(o=>`<option value="${o}" ${valor===o?'selected':''}>${o}</option>`).join('') + `</select>`;
+}
+function setElem(side, key, field, value){
   const p = currentProject();
   if(!p.estructural.elementos) p.estructural.elementos = {};
   if(!p.estructural.elementosDer) p.estructural.elementosDer = {};
   const store = side==='left' ? p.estructural.elementos : p.estructural.elementosDer;
   if(!store[key]) store[key] = {};
-  store[key][field] = checked ? 'Sí' : 'No';
+  store[key][field] = value;
   saveDB();
 }
 function addElementoExtra(){
@@ -785,10 +1164,10 @@ function addElementoExtra(){
   saveDB();
   renderContent();
 }
-function toggleElemExtra(i, field, checked){
+function setElemExtra(i, field, value){
   const p = currentProject();
   if(!p.estructural.elementosExtra || !p.estructural.elementosExtra[i]) return;
-  p.estructural.elementosExtra[i][field] = checked ? 'Sí' : 'No';
+  p.estructural.elementosExtra[i][field] = value;
   saveDB();
 }
 function removeElemExtra(i){
@@ -797,11 +1176,11 @@ function removeElemExtra(i){
   saveDB();
   renderContent();
 }
-function toggleMemoria(key, field, checked){
+function setMemoria(key, field, value){
   const p = currentProject();
   if(!p.estructural.memorias) p.estructural.memorias = {};
   if(!p.estructural.memorias[key]) p.estructural.memorias[key] = {};
-  p.estructural.memorias[key][field] = checked ? 'Sí' : 'No';
+  p.estructural.memorias[key][field] = value;
   saveDB();
 }
 function selEstado(row, value){
@@ -840,25 +1219,25 @@ function renderEstructural(p,c){
   }).join('');
 
   const leftRows = ELEM_LEFT.map(([key,label])=>`
-    <div class="checkrow"><span>${label}</span>
-      <input type="checkbox" ${elemVal(p,'left',key,'realizado')==='Sí'?'checked':''} onchange="toggleElem('left','${key}','realizado',this.checked)">
-      <input type="checkbox" ${elemVal(p,'left',key,'diagramado')==='Sí'?'checked':''} onchange="toggleElem('left','${key}','diagramado',this.checked)">
+    <div class="checkrow sel"><span>${label}</span>
+      ${selSNA(elemVal(p,'left',key,'realizado'), `setElem('left','${key}','realizado',`)}
+      ${selSNA(elemVal(p,'left',key,'diagramado'), `setElem('left','${key}','diagramado',`)}
     </div>`).join('');
   const rightRows = ELEM_RIGHT.map(([key,label])=>`
-    <div class="checkrow"><span>${label}</span>
-      <input type="checkbox" ${elemVal(p,'right',key,'realizado')==='Sí'?'checked':''} onchange="toggleElem('right','${key}','realizado',this.checked)">
-      <input type="checkbox" ${elemVal(p,'right',key,'diagramado')==='Sí'?'checked':''} onchange="toggleElem('right','${key}','diagramado',this.checked)">
+    <div class="checkrow sel"><span>${label}</span>
+      ${selSNA(elemVal(p,'right',key,'realizado'), `setElem('right','${key}','realizado',`)}
+      ${selSNA(elemVal(p,'right',key,'diagramado'), `setElem('right','${key}','diagramado',`)}
     </div>`).join('');
   const extraRows = p.estructural.elementosExtra.map((el,i)=>`
-    <div class="checkrowx"><span>${escapeHtml(el.label)}</span>
-      <input type="checkbox" ${el.realizado==='Sí'?'checked':''} onchange="toggleElemExtra(${i},'realizado',this.checked)">
-      <input type="checkbox" ${el.diagramado==='Sí'?'checked':''} onchange="toggleElemExtra(${i},'diagramado',this.checked)">
+    <div class="checkrowx sel"><span>${escapeHtml(el.label)}</span>
+      ${selSNA(el.realizado||'No', `setElemExtra(${i},'realizado',`)}
+      ${selSNA(el.diagramado||'No', `setElemExtra(${i},'diagramado',`)}
       <button class="delbtnx" title="Quitar elemento" onclick="removeElemExtra(${i})">✕</button>
     </div>`).join('');
   const memRows = MEMORIAS_ITEMS.map(([key,label])=>`
-    <div class="checkrow"><span>${label}</span>
-      <input type="checkbox" ${memVal(p,key,'radicacion')==='Sí'?'checked':''} onchange="toggleMemoria('${key}','radicacion',this.checked)">
-      <input type="checkbox" ${memVal(p,key,'subsanacion')==='Sí'?'checked':''} onchange="toggleMemoria('${key}','subsanacion',this.checked)">
+    <div class="checkrow sel"><span>${label}</span>
+      ${selSNA(memVal(p,key,'radicacion'), `setMemoria('${key}','radicacion',`)}
+      ${selSNA(memVal(p,key,'subsanacion'), `setMemoria('${key}','subsanacion',`)}
     </div>`).join('');
 
   c.innerHTML = `
@@ -876,21 +1255,21 @@ function renderEstructural(p,c){
 
    <div class="card">
      <h3>Información actualizada a última versión del proyecto</h3>
-     <div class="hint">Refleja el estado de "¿Realizado?" y "¿Diagramado?" de cada elemento, tal como aparece en la hoja GENERAL del Excel. Cada casilla se guarda automáticamente al marcarla.</div>
+     <div class="hint">Refleja el estado de "¿Realizado?" y "¿Diagramado?" de cada elemento, tal como aparece en la hoja GENERAL del Excel: Sí, No o No aplica. Cada cambio se guarda automáticamente.</div>
      <div class="checkcols">
        <div class="checkgrid">
-         <div class="checkhead"><span>Elemento</span><span>¿Realizado?</span><span>¿Diagramado?</span></div>
+         <div class="checkhead sel"><span>Elemento</span><span>¿Realizado?</span><span>¿Diagramado?</span></div>
          ${leftRows}
        </div>
        <div class="checkgrid">
-         <div class="checkhead"><span>Elemento</span><span>¿Realizado?</span><span>¿Diagramado?</span></div>
+         <div class="checkhead sel"><span>Elemento</span><span>¿Realizado?</span><span>¿Diagramado?</span></div>
          ${rightRows}
        </div>
      </div>
      <div class="stagegroup" style="margin-top:18px;margin-bottom:4px;">Elementos adicionales</div>
      <div class="hint">Elementos que no están en la lista estándar. Se crean como filas nuevas al final de la hoja GENERAL del Excel (a partir de la fila 130, dejando margen para la sección de Trámites), sin afectar ninguna celda existente.</div>
      <div class="checkgrid">
-       <div class="checkrowx" style="border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--muted);"><span>Elemento</span><span>¿Realizado?</span><span>¿Diagramado?</span><span></span></div>
+       <div class="checkrowx sel" style="border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--muted);"><span>Elemento</span><span>¿Realizado?</span><span>¿Diagramado?</span><span></span></div>
        ${extraRows || '<div style="padding:8px 0;color:var(--muted);font-size:13px;">Sin elementos adicionales todavía.</div>'}
      </div>
      <div class="row-actions" style="margin-top:10px;">
@@ -901,9 +1280,9 @@ function renderEstructural(p,c){
 
    <div class="card">
      <h3>Contenido de las memorias de cálculo</h3>
-     <div class="hint">Marca el estado de Radicación y Subsanación de cada punto exigido en las memorias de cálculo. Se guarda automáticamente al marcar cada casilla.</div>
+     <div class="hint">Estado de Radicación y Subsanación de cada punto exigido en las memorias de cálculo: Sí, No o No aplica. Se guarda automáticamente.</div>
      <div class="checkgrid">
-       <div class="checkhead"><span>Punto</span><span>Radicación</span><span>Subsanación</span></div>
+       <div class="checkhead sel"><span>Punto</span><span>Radicación</span><span>Subsanación</span></div>
        ${memRows}
      </div>
    </div>
@@ -917,7 +1296,9 @@ function autoSaveEstructuralItem(){
 }
 function autoSaveEstructuralDesc(){
   const p = currentProject();
-  p.estructural.descripcion = document.getElementById('s_desc').value;
+  const valor = document.getElementById('s_desc').value;
+  if(!p || (p.estructural.descripcion||'')===valor) return; // salir del campo sin cambiar nada no guarda
+  p.estructural.descripcion = valor;
   p.estructural.fechaActualizacion = todayISO();
   saveDB();
 }
@@ -953,12 +1334,13 @@ function renderGeotecnico(p,c){
 }
 function autoSaveGeoDesc(){
   const p = currentProject();
-  p.geotecnico.descripcion = document.getElementById('geo_desc').value;
+  const valor = document.getElementById('geo_desc').value;
+  if(!p || (p.geotecnico.descripcion||'')===valor) return;
+  p.geotecnico.descripcion = valor;
   p.geotecnico.fechaActualizacion = todayISO();
   saveDB();
 }
 
-/* ---------- TAB ARQUITECTURA ---------- */
 /* ---------- TAB ARQUITECTURA ---------- */
 function arqVal(p, row, field){
   if(!p.arquitectura.items) p.arquitectura.items = {};
@@ -979,6 +1361,7 @@ function setArqEstado(row, value){
 }
 function setArqComentario(row, value){
   const p = currentProject();
+  if(!p || arqVal(p,row,'comentario')===value) return;
   if(!p.arquitectura.items) p.arquitectura.items = {};
   if(!p.arquitectura.items[row]) p.arquitectura.items[row] = {estado:'Sí', comentario:''};
   p.arquitectura.items[row].comentario = value;
@@ -1052,6 +1435,74 @@ function renderHidrosanitario(p,c){
   `;
 }
 
+/* ---------- TAB PENDIENTES ---------- */
+function totalPendientes(p){
+  if(!p || !p.pendientes) return 0;
+  return PEND_LISTAS.reduce((s,l)=> s + ((p.pendientes[l.key]||[]).length), 0);
+}
+function renderPendientes(p,c){
+  const pend = asegurarPendientes(p);
+  const bloques = PEND_LISTAS.map(l=>{
+    const lista = pend[l.key];
+    const filas = lista.map((it,i)=>`
+      <div class="pendrow">
+        <input value="${escapeHtml(it.pendiente)}" placeholder="Pendiente" onblur="setPendiente('${l.key}',${i},'pendiente',this.value)">
+        <input value="${escapeHtml(it.descripcion)}" placeholder="Descripción / observación" onblur="setPendiente('${l.key}',${i},'descripcion',this.value)">
+        <button class="pendok" title="Completado: quitar de la lista" onclick="completarPendiente('${l.key}',${i})">✓</button>
+      </div>`).join('');
+    return `
+     <div class="card">
+       <h3>${escapeHtml(l.label)} <span class="pendcount">${lista.length||''}</span></h3>
+       <div class="pendgrid">
+         <div class="pendhead"><span>Pendiente</span><span>Descripción / observación</span><span></span></div>
+         ${filas || '<div class="pendvacio">Sin pendientes.</div>'}
+       </div>
+       <div class="pendrow pendnuevo">
+         <input id="pn_${l.key}_p" data-borrador placeholder="Nuevo pendiente" onkeydown="if(event.key==='Enter')agregarPendiente('${l.key}')">
+         <input id="pn_${l.key}_d" data-borrador placeholder="Descripción / observación" onkeydown="if(event.key==='Enter')agregarPendiente('${l.key}')">
+         <button class="secondary" onclick="agregarPendiente('${l.key}')" title="Agregar pendiente">+</button>
+       </div>
+     </div>`;
+  }).join('');
+  c.innerHTML = `
+   <div class="hint" style="margin:0 0 14px;">Refleja la hoja "LISTADO DE PENDIENTES" del Excel. Cada listado admite los pendientes que hagan falta (si pasan de 5, el Excel agrega las filas necesarias). Al completar uno, pulsa ✓ para quitarlo de la lista. Los cambios se guardan solos al salir de cada campo.</div>
+   ${bloques}
+  `;
+}
+function agregarPendiente(key){
+  const p = currentProject();
+  const inP = document.getElementById('pn_'+key+'_p');
+  const inD = document.getElementById('pn_'+key+'_d');
+  const pendiente = inP.value.trim(), descripcion = inD.value.trim();
+  if(!pendiente && !descripcion){ toast('Escribe el pendiente antes de agregarlo.'); inP.focus(); return; }
+  asegurarPendientes(p)[key].push({pendiente, descripcion});
+  saveDB();
+  renderContent();
+  renderTabs();
+  // Deja el cursor listo para escribir el siguiente
+  const siguiente = document.getElementById('pn_'+key+'_p');
+  if(siguiente) siguiente.focus();
+}
+function setPendiente(key, i, field, value){
+  const p = currentProject();
+  const it = asegurarPendientes(p)[key][i];
+  if(!it || it[field]===value) return;
+  it[field] = value;
+  saveDB();
+}
+function completarPendiente(key, i){
+  const p = currentProject();
+  const lista = asegurarPendientes(p)[key];
+  const it = lista[i];
+  if(!it) return;
+  if(!confirm('¿Marcar como completado y quitar de la lista?\n\n"'+(it.pendiente||it.descripcion)+'"')) return;
+  lista.splice(i,1);
+  saveDB();
+  renderContent();
+  renderTabs();
+  toast('✓ Pendiente completado.');
+}
+
 /* ==================== TOAST ==================== */
 let toastTimer=null;
 function toast(msg){
@@ -1099,7 +1550,7 @@ async function buildWorkbook(p, base){
   W(G,'B7','CLIENTE');
   W(G,'D7', p.general.cliente||'');
 
-  // Información actualizada a última versión del proyecto (filas 76-86)
+  // Información actualizada a última versión del proyecto (filas 90-100, ver ELEM_LEFT / ELEM_RIGHT)
   if(p.estructural.elementos){
     ELEM_LEFT.forEach(([key,label,row])=>{
       const v = p.estructural.elementos[key];
@@ -1112,7 +1563,7 @@ async function buildWorkbook(p, base){
       if(v){ W(G,'G'+row, v.realizado||'No'); W(G,'H'+row, v.diagramado||'No'); }
     });
   }
-  // Contenido de las memorias de cálculo (filas 90-97)
+  // Contenido de las memorias de cálculo (filas 104-111, ver MEMORIAS_ITEMS)
   if(p.estructural.memorias){
     MEMORIAS_ITEMS.forEach(([key,label,row])=>{
       const v = p.estructural.memorias[key];
@@ -1226,7 +1677,25 @@ async function buildWorkbook(p, base){
     });
   }
 
-  return XlsxPatch.patchXlsx(base || b64ToArrayBuffer(TEMPLATE_B64), escrituras);
+  /* ---- HOJA LISTADO DE PENDIENTES ----
+     Se regenera completa en cada guardado desde la plantilla (así los
+     pendientes completados desaparecen también del Excel), y se copia a los
+     Excel creados antes de que existiera esta hoja. Ver aplicarListado en
+     xlsxpatch.js. */
+  const pend = asegurarPendientes(p);
+  const plantilla = b64ToArrayBuffer(TEMPLATE_B64);
+  const listado = {
+    hoja: PEND_HOJA,
+    plantilla,
+    columnas: ['D','E'],
+    bloques: PEND_LISTAS.map(l=>({
+      filaTitulo: l.fila,
+      filas: PEND_FILAS,
+      valores: pend[l.key].map(it=>[it.pendiente||'', it.descripcion||''])
+    }))
+  };
+
+  return XlsxPatch.patchXlsx(base || plantilla, escrituras, {listado});
 }
 
 function descargarArchivo(datos, nombre, mime){
@@ -1242,7 +1711,6 @@ function descargarArchivo(datos, nombre, mime){
 async function exportExcel(){
   const p = currentProject();
   if(!p){ toast('Selecciona un proyecto primero.'); return; }
-  await saveDB();
   try{
     const datos = await buildWorkbook(p);
     const fname = CONFIG.fileName(p);
@@ -1255,12 +1723,22 @@ async function exportExcel(){
 async function sincronizarDrive(){
   const p = currentProject();
   if(!p){ toast('Selecciona un proyecto primero.'); return; }
-  await saveDB();
   const btn = document.getElementById('btnDrive');
   if(btn) btn.disabled = true;
   try{
+    // Conectar primero, sin nada que esperar antes: el navegador solo permite abrir
+    // la ventana de Google inmediatamente después del toque en el botón.
     if(!Drive.conectado()) await Drive.conectar();
     const info = await Drive.sincronizarProyecto(p, msg => toast('☁ '+msg));
+    // Se guarda en la versión vigente del proyecto (la sincronización con el equipo
+    // pudo reemplazar el objeto mientras se subía el archivo).
+    const vigente = DB.projects.find(x=>x.id===p.id);
+    if(vigente){
+      const cambio = !vigente.drive || vigente.drive.fileId!==info.fileId || vigente.drive.nombre!==info.nombre || vigente.drive.anio!==info.anio;
+      vigente.drive = info;
+      if(cambio){ vigente.updatedAt = new Date().toISOString(); } // el enlace nuevo debe llegar al equipo
+      await guardarSinMarcar();
+    }
     toast('✓ Guardado en Drive: ' + info.nombre + ' (carpeta ' + info.anio + ')');
     renderAll();
   }catch(e){
@@ -1271,27 +1749,82 @@ async function sincronizarDrive(){
 }
 
 /* ==================== INIT ==================== */
+// Proyecto y pestaña abiertos: se recuerdan porque la renovación de la sesión
+// de Google recarga la página, y al volver debe quedar todo donde estaba.
+function recordarVista(){
+  try{ localStorage.setItem('hd:vista', JSON.stringify({currentId, currentTab})); }catch(e){}
+}
+function restaurarVista(){
+  try{
+    const v = JSON.parse(localStorage.getItem('hd:vista') || 'null');
+    if(v && DB.projects.some(p=>p.id===v.currentId)){
+      currentId = v.currentId;
+      currentTab = TABS.some(t=>t.id===v.currentTab) ? v.currentTab : 'general';
+      return;
+    }
+  }catch(e){}
+  if(DB.projects.length>0) currentId = DB.projects[0].id;
+}
+
+// Algo escrito en los formularios de "agregar" (trámite, entrega, elemento) que
+// todavía no se agregó: eso no está guardado y se perdería al recargar.
+function hayBorradorSinAgregar(){
+  const porId = ['tr_nro_radicado','tr_fecha_acta','e_obs','e_obs2','e_envio','elem_extra_new']
+    .map(id=>document.getElementById(id));
+  const marcados = Array.from(document.querySelectorAll('[data-borrador]'));
+  return porId.concat(marcados).some(el=> el && el.value.trim()!=='');
+}
+
+// Si la sesión de Google venció, la renueva en silencio (la página va a Google
+// y vuelve en ~1 s). Solo si no se está escribiendo nada, para no perderlo.
+function renovarSesionSiHaceFalta(){
+  if(Drive.conectado() || syncBusy) return false;
+  if(!Drive.puedeRenovarSilencioso()) return false;
+  if(editandoCampo() || hayBorradorSinAgregar()) return false;
+  setSyncStatus('conectando');
+  Drive.renovarSilencioso();
+  return true;
+}
+
 (async function init(){
   await loadDB();
-  if(DB.projects.length>0){ currentId = DB.projects[0].id; }
+  restaurarVista();
   renderAll();
   setSyncStatus();
 
-  // Si ya había una sesión de Google abierta (token de la última hora, ver drive.js),
-  // trae en silencio lo que el resto del equipo haya cambiado. Si no, el estado
-  // queda en "Sin conectar" hasta que alguien pulse 🔄 o "Guardar en Drive".
-  try{
-    await Drive.init();
-    if(Drive.conectado()) await pullFromDrive({silent:true});
-  }catch(e){ /* falta configurar CLIENT_ID en config.js, o sin conexión: se sigue en modo local */ }
-  setSyncStatus();
+  // Sesión de Google vencida pero renovable: ir a Google y volver, sin preguntar nada.
+  if(renovarSesionSiHaceFalta()) return;
 
-  // Sondeo periódico + al volver a la pestaña, para ver proyectos que agregó o cambió
-  // otra persona mientras este dispositivo estaba abierto. Nunca re-renderiza el
-  // formulario del proyecto abierto (solo la lista lateral), para no interrumpir lo
-  // que se esté escribiendo.
-  setInterval(()=>{ if(Drive.conectado()) pullFromDrive({silent:true}); }, 60000);
-  window.addEventListener('focus', ()=>{ if(Drive.conectado()) pullFromDrive({silent:true}); });
+  const retorno = Drive.resultadoRetorno();
+  if(retorno && retorno!=='ok'){
+    toast('No se pudo renovar la sesión de Drive automáticamente. Pulsa 🔄 para conectar.');
+  }
+
+  // Primera actualización automática al abrir: lista del equipo + Excel de Drive
+  // que aún no estén en la app. Si nunca se ha conectado este dispositivo, queda
+  // en "Sin conectar" hasta que alguien pulse 🔄 (la primera vez Google pide
+  // autorizar; desde ahí la sesión se mantiene sola).
+  if(Drive.conectado()) sincronizarEquipo({silent:true, importar:true});
+
+  // Deja lista la librería de Google para el botón 🔄 (conexión manual por ventana).
+  Drive.init().catch(()=>{ /* falta CLIENT_ID en config.js, o sin conexión: se sigue en modo local */ });
+
+  // Sondeo cada minuto y al volver a la app: trae lo que cambió el equipo y, si la
+  // sesión venció mientras la app estaba abierta, la renueva.
+  setInterval(()=>{
+    if(Drive.conectado()) sincronizarEquipo({silent:true});
+    else if(document.visibilityState==='visible' && !renovarSesionSiHaceFalta()) setSyncStatus();
+  }, 60000);
+
+  let ultimaVuelta = 0;
+  function alVolverALaApp(){
+    if(document.visibilityState!=='visible' || Date.now()-ultimaVuelta < 5000) return;
+    ultimaVuelta = Date.now();
+    if(Drive.conectado()) sincronizarEquipo({silent:true});
+    else renovarSesionSiHaceFalta();
+  }
+  window.addEventListener('focus', alVolverALaApp);
+  document.addEventListener('visibilitychange', alVolverALaApp);
 })();
 
 /* ==================== NAVEGACIÓN MÓVIL ==================== */

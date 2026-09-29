@@ -32,7 +32,20 @@ Todo con la cuenta de Gmail que es **dueña de la carpeta de Drive**.
    - *Authorized JavaScript origins*:
      - `http://localhost:8080` (para probar en el PC)
      - `https://haabril7508.github.io` (para GitHub Pages)
+   - *Authorized redirect URIs* (necesarias para que la sesión se renueve
+     sola, ver "Sesión de Drive" más abajo — **escribirlas exactamente así,
+     con la barra final**):
+     - `http://localhost:8080/`
+     - `https://haabril7508.github.io/historial-diseno/`
    - Copiar el **Client ID** (termina en `.apps.googleusercontent.com`).
+
+> Si la app ya estaba configurada antes y solo falta este paso: *APIs &
+> Services → Credentials →* clic en el OAuth Client existente → agregar
+> las dos *Authorized redirect URIs* → **Save**. Google puede tardar unos
+> minutos en aplicarlo. Hacerlo **antes** de publicar la versión v5; si
+> no, al vencer la sesión la app mostrará un error de Google
+> (`redirect_uri_mismatch`) en vez de volver sola. Como plan B, en
+> `config.js` se puede poner `RENOVACION_AUTOMATICA: false`.
 
 > **Sobre la advertencia de Google:** el scope `drive` está clasificado como
 > *restringido*. Aunque la app esté en modo Testing, a los usuarios de prueba
@@ -134,11 +147,22 @@ mismos proyectos desde cualquier dispositivo, no solo los que creó ella.
 
 - Al editar un proyecto (con sesión de Drive activa), el cambio se sube solo,
   unos 1.5 segundos después de dejar de escribir.
-- Al abrir la app, y luego cada minuto (y al volver a la pestaña), se revisa
-  en silencio si el resto del equipo agregó o cambió algo.
+- Al abrir la app se actualiza sola, sin pulsar nada. Después revisa en
+  silencio cada minuto (y al volver a la app) si el resto del equipo
+  agregó o cambió algo.
 - El botón 🔄, junto a "Sin conectar" / "Conectado" en la barra lateral,
   fuerza una actualización inmediata (y pide conectar con Drive si hace
   falta).
+- **Historiales creados antes de la lista compartida:** al abrir la app y
+  al pulsar 🔄 se revisan los Excel de las carpetas de año en Drive; cada
+  Excel que la app aún no conozca se importa como proyecto (leyendo sus
+  celdas), así no hay que volver a crearlo. Un proyecto eliminado desde el
+  dashboard no se vuelve a importar aunque su Excel siga en Drive (salvo
+  los eliminados antes de esta función, que pueden reaparecer una vez:
+  basta con eliminarlos de nuevo).
+- Los proyectos que solo existían en un dispositivo (creados antes de la
+  lista compartida) se suben solos la primera vez que ese dispositivo se
+  conecta.
 - Si dos personas editan **el mismo proyecto** a la vez, gana quien guarde de
   último (igual que con el Excel). Si editan proyectos **distintos**, ambos
   cambios quedan, sin pisarse.
@@ -148,16 +172,45 @@ mismos proyectos desde cualquier dispositivo, no solo los que creó ella.
   guardada en este dispositivo (`localStorage`), pero solo se ven los
   cambios de los demás una vez que se vuelva a conectar.
 
+## Sesión de Drive
+
+- La **primera vez** en cada dispositivo hay que pulsar 🔄 y autorizar con
+  Google. Desde ahí la sesión se mantiene sola: al abrir la app ya queda
+  "☁ Conectado", sin volver a iniciar sesión.
+- Google entrega sesiones de ~1 hora. Cuando vence, la app va a Google y
+  vuelve en un segundo con una sesión nueva, sin preguntar nada (se ve
+  como una recarga rápida). Lo hace al abrir la app, al volver a ella, o
+  mientras está abierta si no se está escribiendo nada en ese momento.
+- Solo vuelve a pedir conectar (🔄) si se cerró la sesión de Google en ese
+  navegador, si se revocó el permiso, o si Google exige autorizar de nuevo.
+
+## Listado de pendientes
+
+- La pestaña **Pendientes** tiene una lista por disciplina (estructural,
+  geotecnia, informes y memorias de cálculo, arquitectura, hidrosanitario).
+  Se agregan con **+** (o Enter) y, al completarlos, se quitan con **✓**.
+- En el Excel van en la hoja **LISTADO DE PENDIENTES**. Si una lista pasa de 5,
+  la hoja agrega las filas necesarias con el mismo formato; al completar
+  pendientes, el bloque vuelve a su tamaño.
+- Esa hoja la escribe la app completa en cada "Guardar en Drive" / "Descargar
+  Excel": lo que se escriba a mano directamente en ella se pierde al guardar
+  desde la app. Los pendientes se manejan desde la app.
+- Los Excel creados antes de esta versión reciben la hoja (al final del libro)
+  la próxima vez que se guarden desde la app.
+
 ## Limitaciones conocidas
 
 - **Sincronización del Excel en un solo sentido** (app → Excel). Si dos
   personas editan el mismo proyecto a la vez, gana quien guarde de último
   en el Excel. No hay bloqueo ni aviso.
-- **La sesión de Google dura ~1 hora.** Al vencer, la app vuelve a pedir
-  conectar (y mientras tanto deja de recibir los cambios del equipo).
-- **iOS instalado en pantalla de inicio:** el login por ventana emergente de
-  Google puede comportarse distinto que en Safari normal. Conviene probarlo
-  temprano en un iPhone real.
+- **iOS instalado en pantalla de inicio:** ahí la renovación automática
+  no se intenta (en iPhone, salir a Google desde la app instalada abre
+  otra ventana y la sesión no vuelve). La sesión sí se conserva al cerrar
+  y reabrir durante su hora de vigencia; pasada la hora hay que pulsar 🔄.
+  En Safari normal (sin instalar) sí se renueva sola.
+- **App en modo Testing en Google Cloud:** es posible que Google pida
+  autorizar de nuevo cada cierto tiempo (del orden de una semana) por estar
+  la app sin verificar; en ese caso basta pulsar 🔄 una vez.
 - **Verificación de Google:** con el scope `drive` en modo Testing, a cada
   usuario le va a salir la pantalla "Google no ha verificado esta app" la
   primera vez. Es esperado — entran por *Configuración avanzada → Ir a
