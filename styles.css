@@ -26,7 +26,11 @@
   .projitem .delbtn:hover{color:#fff;background:rgba(255,255,255,.18);}
   .projitem.active .delbtn{color:rgba(255,255,255,.85);}
   .projitem.active .delbtn:hover{background:rgba(0,0,0,.15);color:#fff;}
-  .yearHead{padding:12px 10px 4px;font-size:11px;font-weight:700;color:rgba(255,255,255,.5);text-transform:uppercase;letter-spacing:.6px;}
+  .yearHead{display:flex;align-items:center;gap:6px;width:100%;margin-top:4px;padding:9px 10px;background:transparent;border:none;border-radius:6px;font:inherit;font-size:11px;font-weight:700;color:rgba(255,255,255,.55);text-transform:uppercase;letter-spacing:.6px;text-align:left;cursor:pointer;}
+  .yearHead:hover{background:rgba(255,255,255,.08);color:rgba(255,255,255,.85);}
+  .yearHead.abierto{color:rgba(255,255,255,.75);}
+  .yearHead .yflecha{width:12px;font-size:13px;line-height:1;}
+  .yearHead .ycount{margin-left:auto;min-width:18px;padding:1px 6px;border-radius:9px;background:rgba(255,255,255,.12);font-size:10px;line-height:15px;text-align:center;letter-spacing:0;}
   .main{flex:1;display:flex;flex-direction:column;min-width:0;}
   .topbar{background:var(--frame);color:#fff;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;}
   .topbar h2{margin:0;font-size:16px;}
@@ -94,6 +98,39 @@
   .pendnuevo button.secondary{height:34px;padding:0;font-size:18px;}
   .pendvacio{padding:8px 0;color:var(--muted);font-size:13px;}
 
+  /* Pestaña Licencia */
+  .licresultado .licetiqueta{font-size:12px;font-weight:600;color:var(--muted);}
+  .licresultado .licvence{margin:4px 0 6px;font-size:22px;font-weight:700;color:var(--navy);}
+  .licresultado .licsub{font-size:13px;color:var(--text);margin-bottom:6px;line-height:1.45;}
+  .licaviso{margin-top:8px;padding:8px 12px;border-radius:6px;font-size:13px;line-height:1.4;}
+  .licaviso.ok{background:#e3f3ea;color:var(--ok);}
+  .licaviso.warn{background:#fbeae4;color:var(--warn);}
+  table.mini.lictabla td:last-child{white-space:nowrap;font-weight:600;}
+  .licnorma summary{cursor:pointer;font-size:14px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.4px;}
+  .licnorma p{font-size:13px;line-height:1.5;margin:10px 0 0;}
+
+  /* Inicio: resumen de pendientes de todos los proyectos */
+  .resumenitem{align-items:center;margin-bottom:6px;border-bottom:1px solid rgba(255,255,255,.12);border-radius:6px;}
+  .resumenitem .pname{font-weight:700;}
+  .resumenitem .rescount{flex-shrink:0;min-width:20px;padding:1px 7px;border-radius:10px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;line-height:17px;text-align:center;}
+  .resumenitem.active .rescount{background:rgba(255,255,255,.25);}
+  .reschips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
+  .reschip{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border:1px solid var(--border);border-radius:16px;background:var(--card);color:var(--text);font:inherit;font-size:12px;font-weight:600;cursor:pointer;}
+  .reschip span{min-width:18px;padding:0 6px;border-radius:9px;background:#eef0f2;color:var(--muted);font-size:11px;line-height:17px;text-align:center;}
+  .reschip.active{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .reschip.active span{background:rgba(255,255,255,.25);color:#fff;}
+  .resproy{border-top:1px solid var(--border);padding:10px 0 6px;}
+  .resproy:first-of-type{border-top:none;padding-top:0;}
+  .resproyhead{display:flex;align-items:baseline;gap:10px;width:100%;padding:4px 0;background:transparent;border:none;font:inherit;text-align:left;cursor:pointer;}
+  .resproyhead .resnombre{font-size:13px;font-weight:700;color:var(--navy);}
+  .resproyhead .resmeta{font-size:11px;color:var(--muted);}
+  .resproyhead .resabrir{margin-left:auto;flex-shrink:0;font-size:12px;font-weight:600;color:var(--accent);}
+  .resproyhead:hover .resnombre{text-decoration:underline;}
+  .reslista{list-style:none;margin:4px 0 0;padding:0 0 0 12px;border-left:3px solid var(--accent);}
+  .reslista li{display:flex;flex-wrap:wrap;column-gap:10px;padding:4px 0;font-size:13px;line-height:1.35;}
+  .reslista .respend{font-weight:600;color:var(--text);}
+  .reslista .resdesc{color:var(--muted);}
+
   /* ==================================================================
      Capa responsive — iOS y Android (PWA instalada)
      El dashboard original era solo de escritorio: no tenia ninguna
@@ -150,7 +187,14 @@
     .pendrow input:nth-child(2){grid-column:1;grid-row:2;}
     .pendrow button{grid-column:2;grid-row:1 / span 2;height:100%;}
 
+    /* Resumen de pendientes: la descripción baja a su propio renglón */
+    .reslista li{flex-direction:column;}
+    .reschip{padding:8px 12px;}
+
     table.mini{display:block;overflow-x:auto;white-space:nowrap;}
+    /* Licencia: el concepto es largo, se deja partir en renglones */
+    table.mini.lictabla{display:table;white-space:normal;}
+    .licresultado .licvence{font-size:19px;}
     button.accent{padding:11px 14px;font-size:13px;}
     button.primary,button.secondary{padding:10px 14px;}
     .footerbar{flex-direction:column;gap:10px;align-items:stretch;padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom));}

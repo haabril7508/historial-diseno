@@ -25,6 +25,8 @@
 
    Excepción: la hoja LISTADO DE PENDIENTES se regenera completa en cada
    guardado (ver aplicarListado), porque sus listas crecen y se achican.
+   Lo mismo TRAMITES LICENCIA cuando la app tiene datos de licencia (ver
+   aplicarHojaCalculada): es una calculadora con fórmulas.
    ==================================================================== */
 
 const XlsxPatch = (function () {
@@ -137,9 +139,26 @@ const XlsxPatch = (function () {
         filas[rNumStr][addr] = cEl;
       }
 
+      const valor = w.value;
+
+      // 'cache': celda con fórmula. Se conserva la fórmula y solo se cambia el
+      // resultado guardado (<v>), que es lo que muestran los visores que no
+      // recalculan. '' = la fórmula da texto vacío.
+      if (w.type === 'cache') {
+        Array.from(cEl.children).forEach((h) => { if (h.localName !== 'f') cEl.removeChild(h); });
+        const v = doc.createElementNS(NS_MAIN, 'v');
+        if (valor === '' || valor === null || valor === undefined) {
+          cEl.setAttribute('t', 'str');
+        } else {
+          cEl.removeAttribute('t');
+          v.textContent = String(valor);
+        }
+        cEl.appendChild(v);
+        return;
+      }
+
       while (cEl.firstChild) cEl.removeChild(cEl.firstChild);
 
-      const valor = w.value;
       if (w.type === 'b') {
         cEl.setAttribute('t', 'b');
         const v = doc.createElementNS(NS_MAIN, 'v');
@@ -419,14 +438,47 @@ const XlsxPatch = (function () {
     zip.file(ruta, parchearHojaXml(null, escrituras, doc));
   }
 
+  /* ---------- hoja con fórmulas que maneja la app (TRAMITES LICENCIA) ----------
+     hoja: { hoja, plantilla, regenerar, escrituras:[{addr, value, type}] }
+     - regenerar (la app tiene datos): la hoja se toma limpia de la plantilla y
+       se escriben los datos y los resultados ('cache').
+     - sin datos: no se toca lo que el Excel ya tenga; si no tiene la hoja
+       (Excel anterior a ella), se le agrega vacía.
+     Las fórmulas cambian de resultado, así que se le pide a Excel que
+     recalcule todo al abrir.                                              */
+  async function aplicarHojaCalculada(zip, h) {
+    const existe = !!(await leerMapaDeHojas(zip))[h.hoja];
+    if (existe && !h.regenerar) return;
+    const zipPlant = await JSZip.loadAsync(h.plantilla);
+    const { ruta, doc } = await hojaLimpiaDesdePlantilla(zip, zipPlant, h.hoja);
+    zip.file(ruta, parchearHojaXml(null, h.escrituras || [], doc));
+    await recalcularAlAbrir(zip);
+  }
+
+  async function recalcularAlAbrir(zip) {
+    const wb = parsear(await zip.file('xl/workbook.xml').async('string'));
+    let calc = primero(wb, 'calcPr');
+    if (!calc) {
+      // calcPr va después de definedNames y antes de estas secciones (orden del esquema).
+      calc = wb.createElementNS(NS_MAIN, 'calcPr');
+      const despues = ['oleSize', 'customWorkbookViews', 'pivotCaches', 'smartTagPr', 'smartTagTypes',
+        'webPublishing', 'fileRecoveryPr', 'webPublishObjects', 'extLst'];
+      const ref = Array.from(wb.documentElement.children).find((c) => despues.includes(c.localName));
+      wb.documentElement.insertBefore(calc, ref || null);
+    }
+    calc.setAttribute('fullCalcOnLoad', '1');
+    zip.file('xl/workbook.xml', serializar(wb));
+  }
+
   /* escrituras: { 'NOMBRE HOJA': [{addr:'D2', value:'...', type:'s'|'n'|'b'}, ...], ... }
-     opciones.listado: ver aplicarListado.                                 */
+     opciones.listado: ver aplicarListado. opciones.licencia: ver aplicarHojaCalculada. */
   async function patchXlsx(baseArrayBuffer, escrituras, opciones) {
     if (typeof JSZip === 'undefined') {
       throw new Error('La librería para leer archivos .xlsx no cargó (sin conexión a internet).');
     }
     const zip = await JSZip.loadAsync(baseArrayBuffer);
     if (opciones && opciones.listado) await aplicarListado(zip, opciones.listado);
+    if (opciones && opciones.licencia) await aplicarHojaCalculada(zip, opciones.licencia);
     const mapaHojas = await leerMapaDeHojas(zip);
 
     for (const nombreHoja of Object.keys(escrituras)) {

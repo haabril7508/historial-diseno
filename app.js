@@ -215,11 +215,11 @@ const HS_MEMORIAS_ITEMS = [
 const PEND_HOJA = 'LISTADO DE PENDIENTES';
 const PEND_FILAS = 5;
 const PEND_LISTAS = [
- {key:'estructural',    label:'Pendientes estructural', fila:3},
- {key:'geotecnia',      label:'Pendientes geotecnia', fila:10},
- {key:'memorias',       label:'Pendientes informes y memorias de cálculo', fila:17},
- {key:'arquitectura',   label:'Pendientes arquitectura', fila:24},
- {key:'hidrosanitario', label:'Pendientes hidrosanitario', fila:31}
+ {key:'estructural',    label:'Pendientes estructural', corto:'Estructural', fila:3},
+ {key:'geotecnia',      label:'Pendientes geotecnia', corto:'Geotecnia', fila:10},
+ {key:'memorias',       label:'Pendientes informes y memorias de cálculo', corto:'Informes y memorias', fila:17},
+ {key:'arquitectura',   label:'Pendientes arquitectura', corto:'Arquitectura', fila:24},
+ {key:'hidrosanitario', label:'Pendientes hidrosanitario', corto:'Hidrosanitario', fila:31}
 ];
 
 // Valores de las casillas de Estructural (Información actualizada y Memorias).
@@ -228,16 +228,31 @@ const OPC_SNA = ['Sí','No','No aplica'];
 
 const TABS = [
  {id:'general', label:'General'},
+ {id:'pendientes', label:'Pendientes'},
  {id:'estructural', label:'Estructural'},
  {id:'geotecnico', label:'Geotécnico'},
  {id:'arquitectura', label:'Arquitectura'},
  {id:'hidrosanitario', label:'Hidrosanitario'},
- {id:'pendientes', label:'Pendientes'}
+ {id:'licencia', label:'Licencia'}
 ];
+
+// Hoja "TRAMITES LICENCIA": cálculo del término para resolver la licencia de
+// construcción (Decreto 1077 de 2015, Arts. 2.2.6.1.2.3.1 y 2.2.6.1.2.2.4).
+// Datos en D6 (radicación), D7 (notificación del Acta de Observaciones), D8
+// (respuesta del solicitante) y D9 (plazo en días hábiles); las fórmulas de
+// C19:D28 hacen el cálculo con los festivos de M3:O21. La app escribe los datos,
+// los festivos que correspondan y el resultado ya calculado (ver
+// escriturasLicencia), y la hoja se regenera desde la plantilla en cada guardado.
+const LIC_HOJA = 'TRAMITES LICENCIA';
+const LIC_PLAZO = 45;          // plazo legal para resolver (días hábiles)
+const LIC_RESPUESTA = 30;      // plazo del solicitante para responder el Acta (días hábiles)
+const LIC_PRORROGA = 15;       // prórroga de ese plazo, a solicitud de parte (días hábiles)
+const LIC_FESTIVOS = 19;       // filas de festivos de la hoja (M3:M21)
+const LIC_EJEMPLO = ['2026-05-20','2026-06-16','2026-08-20']; // caso de ejemplo del Excel maestro: no se importa
 
 /* ==================== ESTADO ==================== */
 let DB = {projects:[]};
-let currentId = null;
+let currentId = null;   // null = vista de inicio: resumen de pendientes de todos los proyectos
 let currentTab = 'general';
 
 function slugify(s){
@@ -258,18 +273,33 @@ function addDays(d,n){ const r=new Date(d.getTime()); r.setDate(r.getDate()+n); 
 // Ley Emiliani (Ley 51 de 1983): festivo se traslada al lunes siguiente si no cae en lunes
 function toMonday(d){ const r=new Date(d.getTime()); const dow=r.getDay(); if(dow!==1) r.setDate(r.getDate()+((8-dow)%7)); return r; }
 function dateKey(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+// Festivos de un año con nombre y tipo, ordenados: [{fecha:'AAAA-MM-DD', nombre, tipo}].
+// Los nombres son los de la hoja TRAMITES LICENCIA del Excel, que los lista.
+const _festivosCache = {};
+function festivosColombia(year){
+  if(_festivosCache[year]) return _festivosCache[year];
+  const lista = [];
+  const F = (d, nombre, tipo)=> lista.push({fecha: dateKey(d), nombre, tipo});
+  [[0,1,'Año Nuevo'],[4,1,'Día del Trabajo'],[6,20,'Día de la Independencia'],[7,7,'Batalla de Boyacá'],
+   [11,8,'Inmaculada Concepción'],[11,25,'Navidad']].forEach(([m,d,n])=>F(new Date(year,m,d), n, 'Fijo'));
+  // Ley Emiliani (Ley 51 de 1983): se trasladan al lunes siguiente
+  const emiliani = [[0,6,'Reyes Magos (Epifanía, trasladado)'],[2,19,'San José (trasladado)'],[5,29,'San Pedro y San Pablo (trasladado)'],
+   [7,15,'La Asunción de la Virgen (trasladado)'],[9,12,'Día de la Raza (trasladado)'],[10,1,'Todos los Santos (trasladado)'],
+   [10,11,'Independencia de Cartagena (trasladado)']];
+  if(year>=2026) emiliani.push([6,9,'Nuestra Señora del Rosario de Chiquinquirá (trasladado)']); // Ley 2578 de 2026
+  emiliani.forEach(([m,d,n])=>F(toMonday(new Date(year,m,d)), n, 'Ley Emiliani'));
+  const easter = easterSunday(year);
+  F(addDays(easter,-3), 'Jueves Santo', 'Móvil'); F(addDays(easter,-2), 'Viernes Santo', 'Móvil'); // no se trasladan
+  F(toMonday(addDays(easter,39)), 'Ascensión del Señor (trasladado)', 'Ley Emiliani');
+  F(toMonday(addDays(easter,60)), 'Corpus Christi (trasladado)', 'Ley Emiliani');
+  F(toMonday(addDays(easter,68)), 'Sagrado Corazón de Jesús (trasladado)', 'Ley Emiliani');
+  lista.sort((a,b)=> a.fecha.localeCompare(b.fecha));
+  return (_festivosCache[year] = lista);
+}
 const _holidayCache = {};
 function colombianHolidays(year){
-  if(_holidayCache[year]) return _holidayCache[year];
-  const fixed = [[0,1],[4,1],[6,20],[7,7],[11,8],[11,25]].map(([m,d])=>new Date(year,m,d));
-  const movable = [[0,6],[2,19],[5,29],[7,15],[9,12],[10,1],[10,11]].map(([m,d])=>toMonday(new Date(year,m,d)));
-  if(year>=2026) movable.push(toMonday(new Date(year,6,9))); // Virgen de Chiquinquirá (Ley 2578 de 2026)
-  const easter = easterSunday(year);
-  const holy = [addDays(easter,-3), addDays(easter,-2)]; // Jueves y Viernes Santo (no se trasladan)
-  const movableEaster = [toMonday(addDays(easter,39)), toMonday(addDays(easter,60)), toMonday(addDays(easter,68))]; // Ascensión, Corpus Christi, Sagrado Corazón
-  const set = new Set([...fixed,...movable,...holy,...movableEaster].map(dateKey));
-  _holidayCache[year] = set;
-  return set;
+  if(!_holidayCache[year]) _holidayCache[year] = new Set(festivosColombia(year).map(f=>f.fecha));
+  return _holidayCache[year];
 }
 function isBusinessDay(d){
   const dow = d.getDay();
@@ -288,6 +318,30 @@ function addBusinessDays(isoDateStr, n){
   }
   return dateKey(date);
 }
+function isoADate(iso){ const [y,m,d] = iso.split('-').map(Number); return new Date(y, m-1, d); }
+// Días hábiles entre dos fechas 'AAAA-MM-DD', ambas incluidas (0 si la primera es posterior).
+function diasHabilesEntre(desdeIso, hastaIso){
+  if(!desdeIso || !hastaIso || desdeIso > hastaIso) return 0;
+  let n = 0;
+  for(let d = isoADate(desdeIso); dateKey(d) <= hastaIso; d = addDays(d,1)) if(isBusinessDay(d)) n++;
+  return n;
+}
+function diaSiguiente(iso){ return dateKey(addDays(isoADate(iso), 1)); }
+function diaAnterior(iso){ return dateKey(addDays(isoADate(iso), -1)); }
+// Fecha local de hoy (todayISO usa la hora UTC y en Colombia cambia de día a las 7 p. m.).
+function hoyLocal(){ return dateKey(new Date()); }
+// Número de serie de Excel (días desde el 30/12/1899) de una fecha 'AAAA-MM-DD'.
+function serialExcel(iso){
+  const [y,m,d] = iso.split('-').map(Number);
+  return Math.round((Date.UTC(y,m-1,d) - Date.UTC(1899,11,30)) / 86400000);
+}
+const DIAS_SEMANA = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
+// '2026-09-30' -> '30/09/2026 (miércoles)', como lo muestra el Excel.
+function fechaLarga(iso){
+  if(!iso) return '';
+  const [y,m,d] = iso.split('-');
+  return d+'/'+m+'/'+y+' ('+DIAS_SEMANA[isoADate(iso).getDay()]+')';
+}
 
 function fmtDate(d){ if(!d) return ''; return d; }
 function uid(){ return 'p-' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -304,8 +358,23 @@ function blankProject(){
     geotecnico:{items:{}, fechaActualizacion:'', descripcion:''},
     arquitectura:{items:{}},
     hidrosanitario:{elementos:{}, memorias:{}},
-    pendientes: pendientesVacios() // {estructural:[{pendiente,descripcion}], geotecnia:[...], ...}
+    pendientes: pendientesVacios(), // {estructural:[{pendiente,descripcion}], geotecnia:[...], ...}
+    licencia: licenciaVacia()
   };
+}
+function licenciaVacia(){
+  return {fechaRadicacion:'', fechaActa:'', fechaRespuesta:'', plazo:LIC_PLAZO};
+}
+// Los proyectos creados antes de la pestaña Licencia no traen el bloque.
+function asegurarLicencia(p){
+  if(!p.licencia) p.licencia = licenciaVacia();
+  const n = Number(p.licencia.plazo);
+  if(!(n>0)) p.licencia.plazo = LIC_PLAZO;
+  return p.licencia;
+}
+function licenciaTieneDatos(p){
+  const l = p.licencia;
+  return !!l && !!(l.fechaRadicacion || l.fechaActa || l.fechaRespuesta);
 }
 function pendientesVacios(){
   const o = {};
@@ -488,10 +557,10 @@ async function sincronizarEquipo(opts){
 
     // Se fusiona de nuevo con DB (no se reemplaza) por si el usuario editó algo
     // mientras se esperaba a Drive: esa edición es más reciente y se conserva.
+    const resumenAntes = firmaResumen();
     DB = mergeDB(DB, fusion);
-    if(!DB.projects.some(p=>p.id===currentId)){
-      currentId = DB.projects.length ? DB.projects[0].id : null;
-    }
+    // Si otro dispositivo eliminó el proyecto abierto, se vuelve al resumen de pendientes.
+    if(currentId && !DB.projects.some(p=>p.id===currentId)) currentId = null;
     await persistLocalOnly();
 
     // El formulario abierto solo se redibuja si su proyecto se eliminó, o si lo
@@ -501,6 +570,7 @@ async function sincronizarEquipo(opts){
     const actual = currentProject();
     const cambioRemoto = !!actual && !!objAntes && actual!==objAntes && actual.updatedAt!==objAntes.updatedAt;
     if(currentId!==idAntes || (cambioRemoto && !editandoCampo() && !hayBorradorSinAgregar())) renderAll();
+    else if(!currentId && firmaResumen()!==resumenAntes) renderAll(); // el resumen no tiene campos editables
     else { renderProjectList(); renderTabs(); }
 
     setSyncStatus('ok');
@@ -647,7 +717,7 @@ function nombreDesdeArchivo(nombreArchivo){
 
 async function proyectoDesdeExcel(datos, archivo){
   const E_NOMBRE = 'DISEÑO ESTRUCTURAL', GEO_NOMBRE = 'ESTUDIOS DE SUELOS';
-  const H = await XlsxPatch.leerCeldas(datos, ['GENERAL', E_NOMBRE, GEO_NOMBRE, 'ARQUITECTURA', 'HIDROSANITARIO', PEND_HOJA]);
+  const H = await XlsxPatch.leerCeldas(datos, ['GENERAL', E_NOMBRE, GEO_NOMBRE, 'ARQUITECTURA', 'HIDROSANITARIO', PEND_HOJA, LIC_HOJA]);
   const G = H['GENERAL'], E = H[E_NOMBRE], GEO = H[GEO_NOMBRE], ARQ = H['ARQUITECTURA'], HS = H['HIDROSANITARIO'];
   // Sí / No / No aplica tal como vengan; cualquier otra cosa cuenta como No.
   const sna = (v)=> OPC_SNA.includes(v) ? v : 'No';
@@ -750,6 +820,15 @@ async function proyectoDesdeExcel(datos, archivo){
     }
   });
 
+  /* ---- TRAMITES LICENCIA (los Excel viejos no tienen la hoja) ----
+     Se ignora el caso de ejemplo que trae el Excel maestro. */
+  const LH = H[LIC_HOJA] || {};
+  const fechaLic = (addr)=>{ const f = celFecha(LH, addr); return /^\d{4}-\d{2}-\d{2}$/.test(f) ? f : ''; };
+  const lic = {fechaRadicacion: fechaLic('D6'), fechaActa: fechaLic('D7'), fechaRespuesta: fechaLic('D8'),
+               plazo: Number(LH['D9']) > 0 ? Math.round(Number(LH['D9'])) : LIC_PLAZO};
+  const esEjemplo = lic.fechaRadicacion===LIC_EJEMPLO[0] && lic.fechaActa===LIC_EJEMPLO[1] && lic.fechaRespuesta===LIC_EJEMPLO[2];
+  if(!esEjemplo) p.licencia = lic;
+
   /* ---- DISEÑO ESTRUCTURAL: el último ítem marcado es el punto en que quedó ---- */
   let ultimo = null;
   STRUCT_FLAT.forEach(it=>{ if(celMarcada(E,'C'+it.row)) ultimo = it.row; });
@@ -796,6 +875,7 @@ function newProject(){
   DB.projects.unshift(p);
   currentId = p.id;
   currentTab = 'general';
+  fijarAnioAbierto(anioDe(p), true); // que el proyecto nuevo se vea en la barra lateral
   saveDB();
   renderAll();
 }
@@ -806,30 +886,84 @@ function selectProject(id){
   renderAll();
 }
 
+// Vuelve a la vista de inicio (resumen de pendientes de todos los proyectos).
+function abrirResumen(){
+  currentId = null;
+  renderAll();
+}
+
+// Desde el resumen: abre el proyecto directamente en su pestaña Pendientes.
+function abrirPendientesDe(id){
+  const p = DB.projects.find(x=>x.id===id);
+  if(!p) return;
+  currentId = id;
+  currentTab = 'pendientes';
+  fijarAnioAbierto(anioDe(p), true);
+  renderAll();
+}
+
+/* Años plegados / desplegados en la barra lateral. Es una preferencia de cada
+   dispositivo (localStorage), no un dato del proyecto: no pasa por saveDB().
+   Un año que nadie ha tocado arranca desplegado solo si contiene el proyecto
+   abierto; los demás arrancan plegados. */
+const K_ANIOS = 'hd:anios-abiertos';
+function anioDe(p){ return p.general.anio || 'Sin año'; }
+function leerAniosAbiertos(){
+  try{ return JSON.parse(localStorage.getItem(K_ANIOS) || '{}') || {}; }catch(e){ return {}; }
+}
+function anioAbierto(y){
+  const guardado = leerAniosAbiertos()[y];
+  if(typeof guardado==='boolean') return guardado;
+  const p = currentProject();
+  return !!p && anioDe(p)===y;
+}
+function fijarAnioAbierto(y, abierto){
+  const anios = leerAniosAbiertos();
+  anios[y] = abierto;
+  try{ localStorage.setItem(K_ANIOS, JSON.stringify(anios)); }catch(e){}
+}
+
 function renderProjectList(){
   const list = document.getElementById('projList');
   const q = (document.getElementById('searchBox').value||'').toLowerCase();
   list.innerHTML = '';
+
+  // Primera entrada fija: el resumen de pendientes de todos los proyectos.
+  const total = DB.projects.reduce((s,p)=> s + totalPendientes(p), 0);
+  const resumen = document.createElement('div');
+  resumen.className = 'projitem resumenitem' + (currentId===null ? ' active' : '');
+  resumen.title = 'Ver los pendientes de todos los proyectos';
+  resumen.innerHTML = `<div class="pname">📋 Pendientes<small>Todos los proyectos</small></div>${total ? `<span class="rescount">${total}</span>` : ''}`;
+  resumen.onclick = abrirResumen;
+  list.appendChild(resumen);
+
   const projects = DB.projects.filter(p=>{
     const s = (p.general.ruta+' '+p.general.descripcion+' '+p.general.cliente+' '+p.general.ubicacion+' '+p.general.nombre).toLowerCase();
     return s.includes(q);
   });
   if(projects.length===0){
-    list.innerHTML = '<div style="padding:14px;color:rgba(255,255,255,.5);font-size:12px;">Sin proyectos aún. Crea uno con "+ Nuevo proyecto".</div>';
+    list.insertAdjacentHTML('beforeend', '<div style="padding:14px;color:rgba(255,255,255,.5);font-size:12px;">' +
+      (q ? 'Ningún proyecto coincide con la búsqueda.' : 'Sin proyectos aún. Crea uno con "+ Nuevo proyecto".') + '</div>');
     return;
   }
-  // Agrupar como carpetas por año
+  // Agrupar como carpetas por año, desplegables (ver anioAbierto)
   const groups = {};
   projects.forEach(p=>{
-    const y = p.general.anio || 'Sin año';
+    const y = anioDe(p);
     (groups[y] = groups[y]||[]).push(p);
   });
   const years = Object.keys(groups).sort((a,b)=> b.localeCompare(a,undefined,{numeric:true}));
   years.forEach(y=>{
-    const yearHead = document.createElement('div');
-    yearHead.className = 'yearHead';
-    yearHead.textContent = '📁 ' + y;
+    // Al buscar se muestran todos los años con resultados, aunque estén plegados.
+    const abierto = q ? true : anioAbierto(y);
+    const yearHead = document.createElement('button');
+    yearHead.type = 'button';
+    yearHead.className = 'yearHead' + (abierto ? ' abierto' : '');
+    yearHead.title = abierto ? 'Plegar año' : 'Desplegar año';
+    yearHead.innerHTML = `<span class="yflecha">${abierto?'▾':'▸'}</span>📁 ${escapeHtml(y)}<span class="ycount">${groups[y].length}</span>`;
+    if(!q) yearHead.onclick = ()=>{ fijarAnioAbierto(y, !abierto); renderProjectList(); };
     list.appendChild(yearHead);
+    if(!abierto) return;
     groups[y].forEach(p=>{
       const div = document.createElement('div');
       div.className = 'projitem' + (p.id===currentId?' active':'');
@@ -854,10 +988,7 @@ function deleteProject(id){
   // Su Excel sigue en Drive: esta lápida evita que la importación lo traiga de vuelta.
   if(p.drive && p.drive.fileId) DB.deletedIds['x-'+p.drive.fileId] = DB.deletedIds[id];
   DB.projects = DB.projects.filter(x=>x.id!==id);
-  if(currentId===id){
-    currentId = DB.projects.length>0 ? DB.projects[0].id : null;
-    currentTab = 'general';
-  }
+  if(currentId===id) currentId = null; // se vuelve al resumen de pendientes
   guardarSinMarcar(); // no saveDB(): marcaría como editado el proyecto que quedó abierto
   renderAll();
   toast('🗑 Proyecto "'+name+'" eliminado del dashboard.');
@@ -877,8 +1008,19 @@ function renderAll(){
 
 function renderTopbar(){
   const p = currentProject();
-  document.getElementById('projTitle').textContent = p ? (p.general.nombre || p.general.descripcion || p.general.ruta || 'Proyecto sin nombre') : 'Selecciona o crea un proyecto';
-  document.getElementById('projSub').textContent = p ? (p.general.ruta ? '📂 '+p.general.ruta : 'Sin ruta de carpeta asignada') : '';
+  // "Guardar en Drive" y "Descargar Excel" son de un proyecto: en el resumen no aplican.
+  const acciones = document.querySelector('.topbar .acciones');
+  if(acciones) acciones.style.display = p ? '' : 'none';
+  if(!p){
+    const r = resumenPendientes();
+    document.getElementById('projTitle').textContent = 'Pendientes';
+    document.getElementById('projSub').textContent = r.total
+      ? r.total+' pendiente(s) en '+r.proyectos+' proyecto(s)'
+      : 'Resumen de los pendientes de todos los proyectos';
+    return;
+  }
+  document.getElementById('projTitle').textContent = p.general.nombre || p.general.descripcion || p.general.ruta || 'Proyecto sin nombre';
+  document.getElementById('projSub').textContent = p.general.ruta ? '📂 '+p.general.ruta : 'Sin ruta de carpeta asignada';
 }
 
 function renderTabs(){
@@ -886,6 +1028,8 @@ function renderTabs(){
   const bar = document.getElementById('tabsBar');
   bar.innerHTML = '';
   const p = currentProject();
+  bar.style.display = p ? '' : 'none'; // el resumen de pendientes no tiene pestañas
+  if(!p) return;
   TABS.forEach(t=>{
     const el = document.createElement('div');
     el.className = 'tab' + (currentTab===t.id?' active':'');
@@ -896,8 +1040,7 @@ function renderTabs(){
       n.textContent = totalPendientes(p);
       el.appendChild(n);
     }
-    if(p) el.onclick = ()=>{ currentTab=t.id; renderContent(); renderTabs(); };
-    else el.style.opacity = .4;
+    el.onclick = ()=>{ currentTab=t.id; renderContent(); renderTabs(); };
     bar.appendChild(el);
   });
 }
@@ -905,16 +1048,14 @@ function renderTabs(){
 function renderContent(){
   const c = document.getElementById('content');
   const p = currentProject();
-  if(!p){
-    c.innerHTML = '<div class="empty">Crea un proyecto nuevo o selecciona uno existente en la barra lateral para comenzar a diligenciar su historial.</div>';
-    return;
-  }
+  if(!p) return renderResumen(c);
   if(currentTab==='general') return renderGeneral(p,c);
   if(currentTab==='estructural') return renderEstructural(p,c);
   if(currentTab==='geotecnico') return renderGeotecnico(p,c);
   if(currentTab==='arquitectura') return renderArquitectura(p,c);
   if(currentTab==='hidrosanitario') return renderHidrosanitario(p,c);
   if(currentTab==='pendientes') return renderPendientes(p,c);
+  if(currentTab==='licencia') return renderLicencia(p,c);
 }
 
 /* ---------- TAB GENERAL ---------- */
@@ -960,7 +1101,7 @@ function renderGeneral(p,c){
      </div>
      <div class="row-actions"><button class="primary" onclick="addTramite()">+ Agregar trámite</button></div>
      <table class="mini">
-       <thead><tr><th>Trámite ante</th><th>N.º radicado</th><th>Fecha radicación</th><th>Fecha acta</th><th>Vence obs. (30h)</th><th>Prórroga (45h)</th><th></th></tr></thead>
+       <thead><tr><th>Trámite ante</th><th>N.º radicado</th><th>Fecha radicación</th><th>Fecha acta</th><th>Vence obs. (30 días hábiles)</th><th>Prórroga (45 días hábiles)</th><th></th></tr></thead>
        <tbody>${p.tramites.map((t,i)=>{
           const venc = t.fechaActa ? addBusinessDays(t.fechaActa,30) : '';
           const pror = t.fechaActa ? addBusinessDays(t.fechaActa,45) : '';
@@ -1026,7 +1167,7 @@ function renderEntregaExtra(){
 // ¿El proyecto tiene algo más que los datos generales? (para no descartar trabajo sin avisar)
 function tieneDatos(p){
   const e = p.estructural || {}, g = p.geotecnico || {}, a = p.arquitectura || {}, h = p.hidrosanitario || {};
-  return (p.tramites||[]).length>0 || (p.entregas||[]).length>0 || totalPendientes(p)>0 ||
+  return (p.tramites||[]).length>0 || (p.entregas||[]).length>0 || totalPendientes(p)>0 || licenciaTieneDatos(p) ||
     !!e.lastItemRow || !!e.descripcion || (e.elementosExtra||[]).length>0 ||
     [e.elementos, e.elementosDer, e.memorias, g.items, a.items, h.elementos, h.memorias].some(o=> o && Object.keys(o).length>0) ||
     !!g.descripcion;
@@ -1063,10 +1204,13 @@ function autoSaveGeneral(){
       DB.deletedIds[p.id] = new Date().toISOString(); // si no, la sincronización lo traería de vuelta
       DB.projects = DB.projects.filter(x=>x.id!==p.id);
       currentId = dup.id;
+      fijarAnioAbierto(anioDe(dup), true);
       saveDB(); renderAll();
       return;
     }
   }
+  // Si cambió de año, se despliega el año nuevo para no perderlo de vista.
+  if(String(nuevo.anio||'')!==String(p.general.anio||'')) fijarAnioAbierto(nuevo.anio || 'Sin año', true);
   p.general = nuevo;
   saveDB();
   renderProjectList();
@@ -1503,6 +1647,353 @@ function completarPendiente(key, i){
   toast('✓ Pendiente completado.');
 }
 
+/* ---------- TAB LICENCIA (hoja TRAMITES LICENCIA) ---------- */
+
+// Como WORKDAY.INTL de Excel: n días hábiles después de la fecha (antes, si n < 0).
+function diaHabilMas(iso, n){
+  let d = isoADate(iso);
+  const paso = n < 0 ? -1 : 1;
+  for(let k = Math.abs(n); k > 0; ){
+    d = addDays(d, paso);
+    if(isBusinessDay(d)) k--;
+  }
+  return dateKey(d);
+}
+
+// Los 19 festivos (filas M3:M21 de la hoja) a partir de una fecha: con eso las
+// fórmulas del Excel cubren todo el trámite, aunque pase de un año al siguiente.
+function festivosDesde(iso, n){
+  const out = [];
+  for(let y = Number(iso.slice(0,4)); out.length < n; y++){
+    festivosColombia(y).forEach(f=>{ if(f.fecha >= iso && out.length < n) out.push(f); });
+  }
+  return out;
+}
+
+/* Cálculo del término (mismas fórmulas que la hoja del Excel, filas 19 a 28):
+     antes         C19  días hábiles entre la radicación y la notificación del Acta (ambas excluidas)
+     calendario    C21  días calendario de suspensión (notificación -> respuesta, ambas incluidas)
+     habilesResp   C22  días hábiles de suspensión (ambas incluidas)
+     reanudacion   C23  día hábil siguiente a la respuesta
+     pendientes    C24  plazo - antes
+     vencimiento   D27  respuesta + pendientes días hábiles
+     verificacion  D28  antes + pendientes
+   Además cubre los casos que el Excel no muestra: solo radicación (término
+   corriendo) y Acta sin respuesta todavía (término suspendido).            */
+function calcularLicencia(l){
+  const r = {rad:l.fechaRadicacion||'', acta:l.fechaActa||'', resp:l.fechaRespuesta||'',
+             plazo:Number(l.plazo)||LIC_PLAZO, errores:[], avisos:[], completo:false};
+  const hoy = hoyLocal();
+  if(!r.rad && !r.acta && !r.resp){ r.estado = 'vacio'; return r; }
+  if(!r.rad) r.errores.push('Falta la fecha de radicación.');
+  if(r.resp && !r.acta) r.errores.push('Hay fecha de respuesta pero falta la de notificación del Acta de Observaciones.');
+  if(r.rad && r.acta && r.acta < r.rad) r.errores.push('La notificación del Acta es anterior a la radicación.');
+  if(r.acta && r.resp && r.resp < r.acta) r.errores.push('La respuesta es anterior a la notificación del Acta.');
+  if(r.errores.length){ r.estado = 'error'; return r; }
+
+  if(!r.acta){
+    // Sin Acta de Observaciones el término corre sin suspensión.
+    r.estado = 'sinActa';
+    r.vencimiento = diaHabilMas(r.rad, r.plazo);
+    r.transcurridos = diasHabilesEntre(diaSiguiente(r.rad), hoy < r.vencimiento ? hoy : r.vencimiento);
+    return r;
+  }
+
+  r.antes = diasHabilesEntre(diaSiguiente(r.rad), diaAnterior(r.acta));
+  r.pendientes = r.plazo - r.antes;
+  r.venceRespuesta = diaHabilMas(r.acta, LIC_RESPUESTA);
+  r.venceProrroga = diaHabilMas(r.acta, LIC_RESPUESTA + LIC_PRORROGA);
+  if(r.pendientes < 0) r.avisos.push({tipo:'warn', texto:'El Acta se notificó después de vencidos los '+r.plazo+' días hábiles del término.'});
+
+  if(!r.resp){
+    r.estado = 'suspendido';
+    r.usadosRespuesta = diasHabilesEntre(diaSiguiente(r.acta), hoy);
+    if(hoy > r.venceProrroga){
+      r.avisos.push({tipo:'warn', texto:'Venció el plazo máximo para responder el Acta (30 + 15 días hábiles de prórroga) el '+fechaLarga(r.venceProrroga)+'.'});
+    }else if(hoy > r.venceRespuesta){
+      r.avisos.push({tipo:'warn', texto:'Vencieron los 30 días hábiles para responder: solo se puede responder si se solicitó la prórroga (hasta el '+fechaLarga(r.venceProrroga)+').'});
+    }
+    return r;
+  }
+
+  r.estado = 'completo';
+  r.completo = true;
+  r.calendario = serialExcel(r.resp) - serialExcel(r.acta) + 1;
+  r.habilesResp = diasHabilesEntre(r.acta, r.resp);
+  r.reanudacion = diaHabilMas(r.resp, 1);
+  r.vencimiento = diaHabilMas(r.resp, r.pendientes);
+  r.verificacion = r.antes + r.pendientes;
+  r.usadosRespuesta = diasHabilesEntre(diaSiguiente(r.acta), r.resp);
+  if(r.usadosRespuesta > LIC_RESPUESTA + LIC_PRORROGA){
+    r.avisos.push({tipo:'warn', texto:'La respuesta se entregó '+r.usadosRespuesta+' días hábiles después de la notificación: fuera del plazo máximo (30 + 15 de prórroga). Riesgo de que la solicitud se considere desistida.'});
+  }else if(r.usadosRespuesta > LIC_RESPUESTA){
+    r.avisos.push({tipo:'warn', texto:'La respuesta se entregó '+r.usadosRespuesta+' días hábiles después de la notificación: usó la prórroga de 15 días hábiles (debe haberse solicitado antes de vencer los 30).'});
+  }else{
+    r.avisos.push({tipo:'ok', texto:'La respuesta se entregó '+r.usadosRespuesta+' días hábiles después de la notificación: dentro de los 30 días hábiles.'});
+  }
+  return r;
+}
+
+// Celdas de la hoja TRAMITES LICENCIA: datos, festivos y el resultado ya
+// calculado (para que se vea aunque el visor no recalcule, ej. la vista previa
+// de Drive; Excel de todos modos recalcula al abrir).
+function escriturasLicencia(p){
+  const l = asegurarLicencia(p);
+  const r = calcularLicencia(l);
+  const w = [];
+  const W = (addr, value, type)=> w.push({addr, value, type});
+  if(l.fechaRadicacion) W('D6', serialExcel(l.fechaRadicacion), 'n');
+  if(l.fechaActa) W('D7', serialExcel(l.fechaActa), 'n');
+  if(l.fechaRespuesta) W('D8', serialExcel(l.fechaRespuesta), 'n');
+  W('D9', r.plazo, 'n');
+
+  const inicio = l.fechaRadicacion || l.fechaActa || l.fechaRespuesta;
+  const festivos = festivosDesde(inicio, LIC_FESTIVOS);
+  festivos.forEach((f,i)=>{
+    W('M'+(3+i), serialExcel(f.fecha), 'n');
+    W('N'+(3+i), f.nombre, 's');
+    W('O'+(3+i), f.tipo, 's');
+  });
+  const y1 = festivos[0].fecha.slice(0,4), y2 = festivos[festivos.length-1].fecha.slice(0,4);
+  W('M1', 'Días festivos oficiales de Colombia — ' + (y1===y2 ? y1 : y1+'–'+y2), 's');
+
+  const C = (addr, v)=> W(addr, r.completo ? v : '', 'cache');
+  C('C19', r.antes); C('C21', r.calendario); C('C22', r.habilesResp);
+  C('C23', r.completo ? serialExcel(r.reanudacion) : ''); C('C24', r.pendientes);
+  C('D27', r.completo ? serialExcel(r.vencimiento) : ''); C('D28', r.verificacion);
+  return w;
+}
+
+function setLicencia(campo, valor){
+  const p = currentProject();
+  if(!p) return;
+  const l = asegurarLicencia(p);
+  if(campo==='plazo') valor = Math.max(1, Math.round(Number(valor))||LIC_PLAZO);
+  if(l[campo]===valor) return;
+  l[campo] = valor;
+  saveDB();
+  // Solo se redibuja el resultado: redibujar los campos cortaría la escritura de la fecha.
+  const zona = document.getElementById('lic_calc');
+  if(zona) zona.innerHTML = htmlCalculoLicencia(p);
+  const acciones = document.getElementById('lic_acciones');
+  if(acciones) acciones.innerHTML = htmlAccionesLicencia(p);
+}
+
+// El último trámite de la pestaña General que tenga fecha de radicación.
+function tramiteParaLicencia(p){
+  return (p.tramites||[]).slice().reverse().find(t=>t.fechaRadicacion) || null;
+}
+function tomarFechasDelTramite(){
+  const p = currentProject();
+  const t = p && tramiteParaLicencia(p);
+  if(!t) return;
+  const l = asegurarLicencia(p);
+  if(licenciaTieneDatos(p) && !confirm('¿Reemplazar las fechas de radicación y del Acta por las del trámite "'+
+      (t.tipo==='Curaduría' ? 'Curaduría '+(t.numero||'') : 'Planeación')+(t.nroRadicado ? ' · '+t.nroRadicado : '')+'"?')) return;
+  if(l.fechaRadicacion===t.fechaRadicacion && l.fechaActa===(t.fechaActa||'')) return;
+  l.fechaRadicacion = t.fechaRadicacion;
+  l.fechaActa = t.fechaActa || '';
+  saveDB();
+  renderContent();
+  toast('✓ Fechas tomadas del trámite.');
+}
+function borrarLicencia(){
+  const p = currentProject();
+  if(!p || !licenciaTieneDatos(p)) return;
+  if(!confirm('¿Borrar las fechas del cálculo de licencia de este proyecto?')) return;
+  p.licencia = licenciaVacia();
+  saveDB();
+  renderContent();
+}
+
+function htmlAccionesLicencia(p){
+  const t = tramiteParaLicencia(p);
+  return (t ? `<button class="secondary" onclick="tomarFechasDelTramite()" title="Copia la fecha de radicación y la del Acta del último trámite registrado en General">Tomar fechas del trámite</button>` : '') +
+    (licenciaTieneDatos(p) ? `<button class="secondary" onclick="borrarLicencia()">Borrar fechas</button>` : '');
+}
+
+function htmlCalculoLicencia(p){
+  const r = calcularLicencia(asegurarLicencia(p));
+  const hoy = hoyLocal();
+  const avisos = r.avisos.map(a=>`<div class="licaviso ${a.tipo}">${escapeHtml(a.texto)}</div>`).join('');
+  if(r.estado==='vacio'){
+    return `<div class="card"><div class="pendvacio">Escribe la fecha de radicación para calcular el término.</div></div>`;
+  }
+  if(r.estado==='error'){
+    return `<div class="card">${r.errores.map(e=>`<div class="licaviso warn">${escapeHtml(e)}</div>`).join('')}</div>`;
+  }
+
+  // Cuántos días hábiles faltan (o hace cuánto venció) respecto de hoy.
+  const faltan = (venc)=>{
+    if(hoy <= venc){
+      const n = diasHabilesEntre(diaSiguiente(hoy), venc);
+      return n ? 'Faltan '+n+' día(s) hábil(es).' : 'Vence hoy.';
+    }
+    return 'Venció hace '+diasHabilesEntre(diaSiguiente(venc), hoy)+' día(s) hábil(es).';
+  };
+
+  let principal = '';
+  if(r.estado==='sinActa'){
+    principal = `
+      <div class="licetiqueta">Vencimiento del término (si no se notifica Acta de Observaciones)</div>
+      <div class="licvence">${fechaLarga(r.vencimiento)}</div>
+      <div class="licsub">${r.transcurridos} de ${r.plazo} días hábiles transcurridos. ${faltan(r.vencimiento)}</div>`;
+  }else if(r.estado==='suspendido'){
+    principal = `
+      <div class="licetiqueta">Término suspendido desde la notificación del Acta</div>
+      <div class="licvence">Esperando la respuesta del solicitante</div>
+      <div class="licsub">Plazo para responder: hasta el <b>${fechaLarga(r.venceRespuesta)}</b> (30 días hábiles);
+        con prórroga, hasta el <b>${fechaLarga(r.venceProrroga)}</b> (45). Lleva ${r.usadosRespuesta} día(s) hábil(es).</div>
+      <div class="licsub">Del término ya corrieron ${r.antes} día(s) hábil(es); al reanudarse quedarán ${r.pendientes}.</div>`;
+  }else{
+    principal = `
+      <div class="licetiqueta">Fecha en que se cumplen los ${r.plazo} días hábiles (vencimiento del término)</div>
+      <div class="licvence">${fechaLarga(r.vencimiento)}</div>
+      <div class="licsub">${faltan(r.vencimiento)} Verificación: ${r.verificacion} días hábiles contados (${r.antes} + ${r.pendientes}).</div>`;
+  }
+
+  const filas = r.acta ? [
+    ['Días hábiles transcurridos antes de la suspensión (radicación → día previo a la notificación del Acta)', r.antes],
+    ['Días calendario en suspensión (informativo)', r.completo ? r.calendario : '—'],
+    ['Días hábiles que el solicitante tomó para responder (informativo)', r.completo ? r.habilesResp : '—'],
+    ['Fecha de reanudación del término (día hábil siguiente a la entrega de la respuesta)', r.completo ? fechaLarga(r.reanudacion) : '—'],
+    ['Días hábiles pendientes por transcurrir (plazo total − días antes de la suspensión)', r.pendientes]
+  ] : [];
+
+  return `
+   <div class="card licresultado">
+     <h3>Resultado</h3>
+     ${principal}
+     ${avisos}
+   </div>
+   ${filas.length ? `
+   <div class="card">
+     <h3>Cálculo paso a paso</h3>
+     <table class="mini lictabla"><thead><tr><th>Concepto</th><th>Fecha / valor</th></tr></thead>
+       <tbody>${filas.map(([c,v])=>`<tr><td>${escapeHtml(c)}</td><td>${escapeHtml(String(v))}</td></tr>`).join('')}</tbody>
+     </table>
+   </div>` : ''}`;
+}
+
+function renderLicencia(p,c){
+  const l = asegurarLicencia(p);
+  c.innerHTML = `
+   <div class="card">
+     <h3>Datos del trámite de licencia</h3>
+     <div class="hint">Refleja la hoja "TRAMITES LICENCIA" del Excel: cálculo del término para resolver la solicitud de licencia de construcción (Decreto 1077 de 2015). Cada fecha se guarda al cambiarla y el cálculo se actualiza al instante.</div>
+     <div class="grid2">
+       <div class="field"><label>Fecha de radicación de la solicitud (en legal y debida forma)</label>
+         <input type="date" id="lic_rad" value="${escapeHtml(l.fechaRadicacion)}" onchange="setLicencia('fechaRadicacion',this.value)"></div>
+       <div class="field"><label>Fecha de notificación del Acta de Observaciones y Correcciones</label>
+         <input type="date" id="lic_acta" value="${escapeHtml(l.fechaActa)}" onchange="setLicencia('fechaActa',this.value)"></div>
+     </div>
+     <div class="grid2">
+       <div class="field"><label>Fecha de entrega (respuesta) a las observaciones por el solicitante</label>
+         <input type="date" id="lic_resp" value="${escapeHtml(l.fechaRespuesta)}" onchange="setLicencia('fechaRespuesta',this.value)"></div>
+       <div class="field"><label>Plazo legal para resolver la solicitud (días hábiles)</label>
+         <input type="number" id="lic_plazo" min="1" step="1" value="${escapeHtml(String(l.plazo))}" onchange="setLicencia('plazo',this.value)"></div>
+     </div>
+     <div class="row-actions" id="lic_acciones">${htmlAccionesLicencia(p)}</div>
+   </div>
+   <div id="lic_calc">${htmlCalculoLicencia(p)}</div>
+   <div class="card">
+     <details class="licnorma">
+       <summary>Fundamento normativo y metodología</summary>
+       <p><b>Art. 2.2.6.1.2.3.1 Decreto 1077 de 2015 (modif. Decreto 1203 de 2017).</b> Los curadores urbanos o la entidad municipal o distrital competente tienen un plazo máximo de cuarenta y cinco (45) días hábiles para resolver la solicitud de licencia, contados a partir de la radicación en legal y debida forma.</p>
+       <p><b>Art. 2.2.6.1.2.2.4 Decreto 1077 de 2015 (modif. Decretos 1203/2017 y 1783/2021).</b> Efectuada la revisión, el curador levanta —por una sola vez— Acta de Observaciones y Correcciones. El solicitante cuenta con 30 días hábiles para responder (prorrogables 15 días hábiles más). Durante ese lapso se suspende el término de los 45 días, que se reanuda el día hábil siguiente a la entrega de la respuesta.</p>
+       <p><b>Metodología.</b> El día de la radicación no se cuenta (el conteo inicia el día hábil siguiente). El día de notificación del Acta inicia la suspensión (no se cuenta), que se mantiene hasta el día de entrega de la respuesta inclusive. Se excluyen fines de semana y festivos de Colombia (Ley 51 de 1983 y Ley 2578 de 2026).</p>
+     </details>
+   </div>`;
+}
+
+/* ---------- INICIO: RESUMEN DE PENDIENTES DE TODOS LOS PROYECTOS ----------
+   Es la vista que se ve al abrir la app (currentId === null) y la primera
+   entrada de la barra lateral. Solo lee: los pendientes se editan y se
+   completan en la pestaña Pendientes de cada proyecto (abrirPendientesDe). */
+function nombreProyecto(p){
+  return p.general.nombre || p.general.descripcion || p.general.ruta || '(Proyecto sin nombre)';
+}
+
+// { total, proyectos, listas:[{key, label, corto, total, grupos:[{p, items}]}] }
+// Proyectos del año más reciente primero y, dentro del año, por nombre.
+function resumenPendientes(){
+  const orden = DB.projects.slice().sort((a,b)=>
+    String(anioDe(b)).localeCompare(String(anioDe(a)), undefined, {numeric:true}) ||
+    nombreProyecto(a).localeCompare(nombreProyecto(b), 'es', {sensitivity:'base'}));
+  const conPendientes = new Set();
+  const listas = PEND_LISTAS.map(l=>{
+    const grupos = [];
+    orden.forEach(p=>{
+      const items = (p.pendientes && p.pendientes[l.key]) || [];
+      if(items.length){ grupos.push({p, items}); conPendientes.add(p.id); }
+    });
+    return Object.assign({}, l, {grupos, total: grupos.reduce((s,g)=>s+g.items.length, 0)});
+  });
+  return { listas, total: listas.reduce((s,l)=>s+l.total, 0), proyectos: conPendientes.size };
+}
+
+// Huella de lo que muestra el resumen: si no cambia, la sincronización no lo redibuja.
+function firmaResumen(){
+  return JSON.stringify(DB.projects.map(p=>[p.id, nombreProyecto(p), p.general.anio, p.general.ubicacion, p.pendientes||null]));
+}
+
+// Filtro por disciplina del resumen: preferencia de cada dispositivo.
+const K_FILTRO_RESUMEN = 'hd:filtro-pendientes';
+function filtroResumen(){
+  let f = 'todas';
+  try{ f = localStorage.getItem(K_FILTRO_RESUMEN) || 'todas'; }catch(e){}
+  return PEND_LISTAS.some(l=>l.key===f) ? f : 'todas';
+}
+function fijarFiltroResumen(f){
+  try{ localStorage.setItem(K_FILTRO_RESUMEN, f); }catch(e){}
+  renderContent();
+}
+
+function renderResumen(c){
+  const r = resumenPendientes();
+  if(!DB.projects.length){
+    c.innerHTML = '<div class="empty">Aún no hay proyectos. Crea uno con "+ Nuevo proyecto" en la barra lateral.</div>';
+    return;
+  }
+  if(!r.total){
+    c.innerHTML = `<div class="card"><h3>Pendientes</h3><div class="pendvacio">No hay pendientes registrados en ningún proyecto.
+      Se agregan desde la pestaña Pendientes de cada proyecto.</div></div>`;
+    return;
+  }
+  const filtro = filtroResumen();
+  const chip = (key, texto, n)=>
+    `<button type="button" class="reschip${filtro===key?' active':''}" onclick="fijarFiltroResumen('${key}')">${escapeHtml(texto)}<span>${n}</span></button>`;
+  const chips = chip('todas', 'Todas', r.total) + r.listas.map(l=>chip(l.key, l.corto, l.total)).join('');
+
+  const tarjetas = r.listas.filter(l=> filtro==='todas' || l.key===filtro).map(l=>{
+    const grupos = l.grupos.map(g=>{
+      const meta = [anioDe(g.p), g.p.general.ubicacion].filter(Boolean).join(' · ');
+      const items = g.items.map(it=>`
+        <li><span class="respend">${escapeHtml(it.pendiente || '(sin título)')}</span>${it.descripcion ? `<span class="resdesc">${escapeHtml(it.descripcion)}</span>` : ''}</li>`).join('');
+      return `
+       <div class="resproy">
+         <button type="button" class="resproyhead" onclick="abrirPendientesDe('${escapeHtml(g.p.id)}')" title="Abrir los pendientes de este proyecto">
+           <span class="resnombre">${escapeHtml(nombreProyecto(g.p))}</span>
+           <span class="resmeta">${escapeHtml(meta)}</span>
+           <span class="resabrir">Abrir ›</span>
+         </button>
+         <ul class="reslista">${items}</ul>
+       </div>`;
+    }).join('');
+    return `
+     <div class="card">
+       <h3>${escapeHtml(l.label)} <span class="pendcount">${l.total||''}</span></h3>
+       ${grupos || '<div class="pendvacio">Sin pendientes.</div>'}
+     </div>`;
+  }).join('');
+
+  c.innerHTML = `
+   <div class="hint" style="margin:0 0 12px;">Pendientes registrados en todos los proyectos, por disciplina. Toca un proyecto para abrir su pestaña Pendientes, donde se editan o se marcan como completados (✓).</div>
+   <div class="reschips">${chips}</div>
+   ${tarjetas}
+  `;
+}
+
 /* ==================== TOAST ==================== */
 let toastTimer=null;
 function toast(msg){
@@ -1695,7 +2186,19 @@ async function buildWorkbook(p, base){
     }))
   };
 
-  return XlsxPatch.patchXlsx(base || plantilla, escrituras, {listado});
+  /* ---- HOJA TRAMITES LICENCIA ----
+     Con datos en la app, se regenera desde la plantilla y se escriben datos,
+     festivos y resultado (ver escriturasLicencia). Sin datos, no se toca lo
+     que el Excel ya tenga; si el Excel es anterior a la hoja, se le agrega
+     vacía. */
+  const licencia = {
+    hoja: LIC_HOJA,
+    plantilla,
+    regenerar: licenciaTieneDatos(p),
+    escrituras: licenciaTieneDatos(p) ? escriturasLicencia(p) : []
+  };
+
+  return XlsxPatch.patchXlsx(base || plantilla, escrituras, {listado, licencia});
 }
 
 function descargarArchivo(datos, nombre, mime){
@@ -1750,20 +2253,24 @@ async function sincronizarDrive(){
 
 /* ==================== INIT ==================== */
 // Proyecto y pestaña abiertos: se recuerdan porque la renovación de la sesión
-// de Google recarga la página, y al volver debe quedar todo donde estaba.
+// de Google recarga la página, y al volver debe quedar todo donde estaba. Van en
+// sessionStorage (vive mientras la pestaña o la app sigan abiertas y sobrevive a
+// esa recarga): al abrir la app de nuevo no hay vista guardada y se arranca en
+// el resumen de pendientes.
 function recordarVista(){
-  try{ localStorage.setItem('hd:vista', JSON.stringify({currentId, currentTab})); }catch(e){}
+  try{ sessionStorage.setItem('hd:vista', JSON.stringify({currentId, currentTab})); }catch(e){}
 }
 function restaurarVista(){
+  try{ localStorage.removeItem('hd:vista'); }catch(e){} // donde se guardaba antes
   try{
-    const v = JSON.parse(localStorage.getItem('hd:vista') || 'null');
+    const v = JSON.parse(sessionStorage.getItem('hd:vista') || 'null');
     if(v && DB.projects.some(p=>p.id===v.currentId)){
       currentId = v.currentId;
       currentTab = TABS.some(t=>t.id===v.currentTab) ? v.currentTab : 'general';
       return;
     }
   }catch(e){}
-  if(DB.projects.length>0) currentId = DB.projects[0].id;
+  currentId = null; // inicio: resumen de pendientes
 }
 
 // Algo escrito en los formularios de "agregar" (trámite, entrega, elemento) que
